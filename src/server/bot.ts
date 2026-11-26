@@ -5,7 +5,7 @@ import { ANIMATION_STYLES, type UploadKind } from "../shared/protocol.ts";
 import type { Config } from "./config.ts";
 import { convertItem, needsAnimationStyle } from "./items.ts";
 import { type JobQueue, itemParams, outputPath, uploadFileName } from "./jobs.ts";
-import { MediaError, aspectRatio, inspect, isPrintShaped } from "./media.ts";
+import { MediaError, aspectRatio, hasTransparency, inspect, isPrintShaped } from "./media.ts";
 import { type ItemRow, type Store, type UserRow, randomId } from "./store.ts";
 import { COMPANION_BUILDS } from "./api.ts";
 import { addSecret, logError } from "./log.ts";
@@ -131,6 +131,7 @@ export function createBot(deps: BotDeps): Bot<BotContext> {
     if (item.kind === "emojianimated" && params.frames && params.fps) {
       details.push(`${params.frames} frames at ${params.fps} fps`);
     }
+    if (params.transparent) details.push("transparent background kept");
     if (params.animationStyle) details.push(`effect: ${params.animationStyle}`);
     if (item.kind === "print" && params.note) details.push(`note: "${esc(params.note.slice(0, 200))}"`);
     const head = `<b>${label}</b>${details.length ? ` (${details.join(", ")})` : ""}`;
@@ -230,7 +231,7 @@ export function createBot(deps: BotDeps): Bot<BotContext> {
 
   const intake = async (
     ctx: BotContext,
-    file: { fileId: string; size: number | undefined; ext: string; animated: boolean },
+    file: { fileId: string; size: number | undefined; ext: string; animated: boolean; compressed?: boolean },
   ): Promise<void> => {
     const user = ctx.appUser;
     const msg = ctx.msg;
@@ -262,7 +263,14 @@ export function createBot(deps: BotDeps): Bot<BotContext> {
         await sendResult(ctx, item);
         return;
       }
-      await ctx.reply("What should this become?", {
+      let prompt = "What should this become?";
+      if (file.compressed) {
+        prompt +=
+          "\n\nThis came in as a photo, so Telegram compressed it and removed any transparency. To keep a transparent background and full quality, send the image as a file instead.";
+      } else if (await hasTransparency(join(dir, inputName))) {
+        prompt += "\n\nTransparent background detected, it will be kept.";
+      }
+      await ctx.reply(prompt, {
         reply_markup: new InlineKeyboard()
           .text("Sticker", `k:${id}:sticker`)
           .text("Emoji", `k:${id}:emoji`)
@@ -392,7 +400,7 @@ Keep the companion running whenever you want uploads to go through.`,
   bot.on("message:photo", async (ctx) => {
     const photo = ctx.msg.photo.at(-1);
     if (!photo) return;
-    await intake(ctx, { fileId: photo.file_id, size: photo.file_size, ext: "jpg", animated: false });
+    await intake(ctx, { fileId: photo.file_id, size: photo.file_size, ext: "jpg", animated: false, compressed: true });
   });
 
   bot.on("message:animation", async (ctx) => {
@@ -470,12 +478,17 @@ Keep the companion running whenever you want uploads to go through.`,
       await ctx.answerCallbackQuery({ text: "Already converted." });
       return;
     }
-    if (kind === "print" && !isPrintShaped(await aspectRatio(join(item.dir, item.input_name)))) {
+    const input = join(item.dir, item.input_name);
+    if (kind === "print" && !isPrintShaped(await aspectRatio(input))) {
+      const transparent = await hasTransparency(input);
       await ctx.answerCallbackQuery();
-      await ctx.editMessageText("Prints are 16:9. Crop the photo to fill the print, or fit the whole photo on a blurred background?", {
+      const question = transparent
+        ? "Prints are 16:9. Crop the picture to fill the print, or fit the whole picture and keep the transparent background around it?"
+        : "Prints are 16:9. Crop the photo to fill the print, or fit the whole photo on a blurred background?";
+      await ctx.editMessageText(question, {
         reply_markup: new InlineKeyboard()
           .text("Crop to fill", `p:${id}:fill`)
-          .text("Fit whole photo", `p:${id}:fit`)
+          .text(transparent ? "Fit whole picture" : "Fit whole photo", `p:${id}:fit`)
           .row()
           .text("Discard", `x:${id}`),
       });

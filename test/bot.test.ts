@@ -193,14 +193,14 @@ describe("conversion flow", () => {
   test("PNG file becomes a sticker, upload needs a paired companion, then queues and finishes", async () => {
     await send(message(FRIEND, { document: { file_id: "documents/logo.png", file_unique_id: "d", file_name: "logo.png", mime_type: "image/png" } }));
     const picker = last("sendMessage");
-    expect(picker.params.text).toBe("What should this become?");
+    expect(picker.params.text).toBe("What should this become?\n\nTransparent background detected, it will be kept.");
     const id = itemIdFrom(picker);
     expect(buttons(picker)).toEqual([`k:${id}:sticker`, `k:${id}:emoji`, `k:${id}:print`, `x:${id}`]);
 
     await send(press(FRIEND, `k:${id}:sticker`, 555));
     const doc = last("sendDocument");
     expect(doc.params.document).toBe("<file sticker.png>");
-    expect(String(doc.params.caption)).toContain("<b>Sticker</b>");
+    expect(String(doc.params.caption)).toContain("<b>Sticker</b> (transparent background kept)");
     expect(buttons(doc)).toEqual([`u:${id}`, `x:${id}`]);
     expect(last("deleteMessage").params.message_id).toBe(555);
     const item = store.item(id);
@@ -242,7 +242,9 @@ describe("conversion flow", () => {
       photo: [{ file_id: "photos/portrait.jpg", file_unique_id: "p", width: 600, height: 1000 }],
       caption: "beach <night>",
     }));
-    const id = itemIdFrom(last("sendMessage"));
+    const picker = last("sendMessage");
+    expect(String(picker.params.text)).toContain("send the image as a file");
+    const id = itemIdFrom(picker);
     await send(press(FRIEND, `k:${id}:print`, 600));
     const ask = last("editMessageText");
     expect(String(ask.params.text)).toContain("16:9");

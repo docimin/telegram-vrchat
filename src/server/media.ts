@@ -60,39 +60,64 @@ async function writePng(pipeline: Sharp, out: string): Promise<void> {
   }
 }
 
-// Stickers and static emoji: trim transparent edges, then fit into a transparent 1024x1024 square.
-export async function makeSquare(input: string, out: string): Promise<void> {
+const CLEAR = { r: 0, g: 0, b: 0, alpha: 0 };
+
+// True when the image has an alpha channel that is actually used (not just fully opaque).
+export async function hasTransparency(input: string): Promise<boolean> {
   const { hasAlpha } = await sharp(input).metadata();
+  if (!hasAlpha) return false;
+  const { isOpaque } = await sharp(input).stats();
+  return !isOpaque;
+}
+
+export interface StillResult {
+  transparent: boolean;
+}
+
+// Stickers and static emoji: trim transparent edges, then fit into a transparent 1024x1024 square.
+export async function makeSquare(input: string, out: string): Promise<StillResult> {
+  const transparent = await hasTransparency(input);
   const base = await sharp(input).autoOrient().ensureAlpha().toBuffer();
   let trimmed = base;
-  if (hasAlpha) {
+  if (transparent) {
     try {
-      trimmed = await sharp(base)
-        .trim({ background: { r: 0, g: 0, b: 0, alpha: 0 }, threshold: 1 })
-        .toBuffer();
+      trimmed = await sharp(base).trim({ background: CLEAR, threshold: 1 }).toBuffer();
     } catch {
-      // Fully transparent or nothing to trim: keep the original.
+      // Nothing to trim: keep the original.
     }
   }
   await writePng(
     sharp(trimmed).resize(STICKER_SIZE, STICKER_SIZE, {
       fit: "contain",
-      background: { r: 0, g: 0, b: 0, alpha: 0 },
+      background: CLEAR,
       kernel: "lanczos3",
     }),
     out,
   );
+  return { transparent };
 }
 
-// Prints are 1920x1080. "fill" crops to 16:9, "fit" keeps the whole photo over a blurred copy of itself.
-export async function makePrint(input: string, out: string, mode: PrintMode): Promise<void> {
-  const source = await sharp(input).autoOrient().removeAlpha().toBuffer();
+// Prints are 1920x1080. "fill" crops to 16:9. "fit" keeps the whole picture: transparent images
+// are padded with transparency, opaque photos sit on a blurred copy of themselves.
+export async function makePrint(input: string, out: string, mode: PrintMode): Promise<StillResult> {
+  const transparent = await hasTransparency(input);
+  // Only drop the alpha channel when it carries nothing; on transparent images it would expose
+  // the hidden colour data of invisible pixels.
+  const oriented = sharp(input).autoOrient();
+  const source = await (transparent ? oriented : oriented.removeAlpha()).toBuffer();
   if (mode === "fill") {
     await writePng(
       sharp(source).resize(PRINT_WIDTH, PRINT_HEIGHT, { fit: "cover", position: "attention" }),
       out,
     );
-    return;
+    return { transparent };
+  }
+  if (transparent) {
+    await writePng(
+      sharp(source).resize(PRINT_WIDTH, PRINT_HEIGHT, { fit: "contain", background: CLEAR }),
+      out,
+    );
+    return { transparent };
   }
   const background = await sharp(source)
     .resize(PRINT_WIDTH, PRINT_HEIGHT, { fit: "cover" })
@@ -106,12 +131,14 @@ export async function makePrint(input: string, out: string, mode: PrintMode): Pr
     .composite([{ input: foreground, gravity: "center" }])
     .toBuffer();
   await writePng(sharp(composed).removeAlpha(), out);
+  return { transparent };
 }
 
 const ProbeOutput = z.object({
   streams: z
     .array(
       z.object({
+        codec_name: z.string().optional(),
         avg_frame_rate: z.string().optional(),
         r_frame_rate: z.string().optional(),
         duration: z.string().optional(),
@@ -145,7 +172,7 @@ async function run(cmd: string[]): Promise<string> {
   return stdout;
 }
 
-export async function probe(input: string): Promise<{ duration: number; fps: number }> {
+export async function probe(input: string): Promise<{ duration: number; fps: number; codec: string }> {
   const raw = await run([
     "ffprobe",
     "-v",
@@ -153,7 +180,7 @@ export async function probe(input: string): Promise<{ duration: number; fps: num
     "-select_streams",
     "v:0",
     "-show_entries",
-    "stream=avg_frame_rate,r_frame_rate,duration:format=duration",
+    "stream=codec_name,avg_frame_rate,r_frame_rate,duration:format=duration",
     "-of",
     "json",
     input,
@@ -164,8 +191,11 @@ export async function probe(input: string): Promise<{ duration: number; fps: num
   if (!Number.isFinite(fps) || fps <= 0) fps = parseRate(stream?.r_frame_rate);
   let duration = Number(stream?.duration);
   if (!Number.isFinite(duration) || duration <= 0) duration = Number(parsed.format?.duration);
-  return { duration, fps };
+  return { duration, fps, codec: stream?.codec_name ?? "" };
 }
+
+// FFmpeg's built-in VP8/VP9 decoders ignore the alpha layer of transparent WebM; libvpx reads it.
+const ALPHA_DECODERS: Record<string, string> = { vp8: "libvpx", vp9: "libvpx-vp9" };
 
 // GIF or video to a 1024x1024 animated emoji sprite sheet.
 export async function makeSpriteSheet(
@@ -173,8 +203,9 @@ export async function makeSpriteSheet(
   out: string,
   workDir: string,
 ): Promise<{ frames: number; fps: number }> {
-  const { duration, fps: sourceFps } = await probe(input);
+  const { duration, fps: sourceFps, codec } = await probe(input);
   const plan = planAnimation(duration, sourceFps);
+  const decoder = ALPHA_DECODERS[codec];
   const framesDir = join(workDir, "frames");
   await rm(framesDir, { recursive: true, force: true });
   await mkdir(framesDir, { recursive: true });
@@ -189,6 +220,7 @@ export async function makeSpriteSheet(
       "ffmpeg",
       "-v",
       "error",
+      ...(decoder ? ["-c:v", decoder] : []),
       "-i",
       input,
       "-vf",

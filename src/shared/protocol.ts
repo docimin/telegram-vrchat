@@ -43,6 +43,8 @@ export const JobParams = z.object({
   fps: z.number().int().min(1).max(64).optional(),
   note: z.string().optional(),
   takenAt: z.string().optional(),
+  // The source image had a transparent background that was kept.
+  transparent: z.boolean().optional(),
 });
 export type JobParams = z.infer<typeof JobParams>;
 

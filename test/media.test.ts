@@ -7,6 +7,7 @@ import { gridFor, planAnimation } from "../src/shared/formats.ts";
 import {
   MediaError,
   aspectRatio,
+  hasTransparency,
   inspect,
   isPrintShaped,
   makePrint,
@@ -105,6 +106,60 @@ describe("still images", () => {
     expect([meta.width, meta.height, meta.hasAlpha]).toEqual([1920, 1080, false]);
   });
 
+  // 400x300 RGBA: invisible pixels carry bright red colour data, a 100x100 opaque blue box sits in the middle.
+  async function transparentArt(path: string): Promise<void> {
+    const w = 400;
+    const h = 300;
+    const raw = Buffer.alloc(w * h * 4);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4;
+        const inBox = x >= 150 && x < 250 && y >= 100 && y < 200;
+        raw.set(inBox ? [0, 0, 255, 255] : [255, 0, 0, 0], i);
+      }
+    }
+    await sharp(raw, { raw: { width: w, height: h, channels: 4 } }).png().toFile(path);
+  }
+
+  async function pixel(path: string, x: number, y: number): Promise<number[]> {
+    return [...(await sharp(path).ensureAlpha().extract({ left: x, top: y, width: 1, height: 1 }).raw().toBuffer())];
+  }
+
+  test("transparent picture as print keeps its transparency in both modes", async () => {
+    const input = join(dir, "art.png");
+    await transparentArt(input);
+    expect(await hasTransparency(input)).toBe(true);
+    for (const mode of ["fit", "fill"] as const) {
+      const out = join(dir, `art-print-${mode}.png`);
+      expect(await makePrint(input, out, mode)).toEqual({ transparent: true });
+      const meta = await sharp(out).metadata();
+      expect([meta.width, meta.height, meta.hasAlpha]).toEqual([1920, 1080, true]);
+      // Hidden red never becomes visible; the box stays opaque blue.
+      expect((await pixel(out, 0, 0))[3]).toBe(0);
+      expect(await pixel(out, 960, 540)).toEqual([0, 0, 255, 255]);
+      const { channels } = await sharp(out).stats();
+      const visibleRed = await sharp(out).ensureAlpha().raw().toBuffer();
+      let leaked = 0;
+      for (let i = 0; i < visibleRed.length; i += 4) {
+        if ((visibleRed[i + 3] ?? 0) > 0 && (visibleRed[i] ?? 0) > 128) leaked++;
+      }
+      expect(leaked).toBe(0);
+      expect(channels).toHaveLength(4);
+    }
+  });
+
+  test("an alpha channel that is fully opaque counts as no transparency", async () => {
+    const input = join(dir, "opaque-rgba.png");
+    await sharp({ create: { width: 320, height: 180, channels: 4, background: { r: 10, g: 20, b: 30, alpha: 1 } } })
+      .png()
+      .toFile(input);
+    expect(await hasTransparency(input)).toBe(false);
+    const out = join(dir, "opaque-print.png");
+    expect(await makePrint(input, out, "fill")).toEqual({ transparent: false });
+    expect((await sharp(out).metadata()).hasAlpha).toBe(false);
+    expect(await makeSquare(join(dir, "portrait.jpg"), join(dir, "jpeg-sticker.png"))).toEqual({ transparent: false });
+  });
+
   test("rejects tiny images", async () => {
     const input = join(dir, "tiny.png");
     await sharp({ create: { width: 32, height: 32, channels: 3, background: "#fff" } }).png().toFile(input);
@@ -140,7 +195,7 @@ describe("animations", () => {
     await Bun.spawn(
       [
         "ffmpeg", "-v", "error", "-f", "lavfi", "-i",
-        "color=c=red@0.0:s=128x128:d=0.5:r=10,format=rgba,drawbox=x=32:y=32:w=64:h=64:color=blue@1:t=fill,split[a][b];[a]palettegen=reserve_transparent=1[p];[b][p]paletteuse=alpha_threshold=128",
+        "color=c=red@0.0:s=128x128:d=0.5:r=10,format=rgba,drawbox=x=32:y=32:w=64:h=64:color=blue@1:t=fill:replace=1,split[a][b];[a]palettegen=reserve_transparent=1[p];[b][p]paletteuse=alpha_threshold=128",
         input,
       ],
       { stdout: "ignore", stderr: "inherit" },
@@ -151,5 +206,26 @@ describe("animations", () => {
     expect(result.frames).toBe(5);
     const corner = await sharp(out).extract({ left: 0, top: 0, width: 1, height: 1 }).raw().toBuffer();
     expect(corner[3]).toBe(0);
+  });
+
+  test("transparent VP9 WebM keeps its alpha", async () => {
+    const input = join(dir, "alpha.webm");
+    const code = await Bun.spawn(
+      [
+        "ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+        "color=c=red@0.0:s=128x128:d=0.5:r=10,format=rgba,drawbox=x=32:y=32:w=64:h=64:color=blue@1:t=fill:replace=1",
+        "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-auto-alt-ref", "0", input,
+      ],
+      { stdout: "ignore", stderr: "inherit" },
+    ).exited;
+    expect(code).toBe(0);
+    const out = join(dir, "webm-sheet.png");
+    const result = await makeSpriteSheet(input, out, dir);
+    expect(result.frames).toBe(5);
+    // 5 frames use the 4x4 grid: the first 256x256 cell has a transparent corner and the opaque box in the middle.
+    const corner = await sharp(out).extract({ left: 5, top: 5, width: 1, height: 1 }).raw().toBuffer();
+    const middle = await sharp(out).extract({ left: 128, top: 128, width: 1, height: 1 }).raw().toBuffer();
+    expect(corner[3]).toBe(0);
+    expect(middle[3]).toBe(255);
   });
 });

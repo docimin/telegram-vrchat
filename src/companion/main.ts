@@ -107,7 +107,12 @@ async function login(config: Paired): Promise<{ config: Paired; user: CurrentUse
 
 async function ensureLoggedIn(config: Paired): Promise<{ config: Paired; vrchat: VRChatClient }> {
   const vrchat = vrchatFor(config);
-  const user = await vrchat.currentUser();
+  // Network errors and VRChat outages are retried; a 4xx answer means something retrying won't fix.
+  const user = await retrying(
+    "VRChat",
+    () => vrchat.currentUser(),
+    (err) => err instanceof VRChatApiError && err.status < 500 && err.status !== 429,
+  );
   if (user) {
     log(`Logged in to VRChat as ${user.displayName}.`);
     return { config, vrchat };
@@ -133,10 +138,35 @@ async function reportWithRetry(server: ServerClient, jobId: string, result: JobR
   log("Couldn't report the result to the bot; it will retry the job later.");
 }
 
+function isPairingError(err: unknown): boolean {
+  return err instanceof ServerError && (err.status === 401 || err.status === 403);
+}
+
+// Keep trying while the other side is down or unreachable; give up only on errors retrying can't fix.
+async function retrying<T>(what: string, fn: () => Promise<T>, fatal: (err: unknown) => boolean): Promise<T> {
+  let backoff = 1000;
+  for (;;) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (fatal(err)) throw err;
+      log(`Can't reach ${what} (${errorText(err)}), retrying in ${Math.round(backoff / 1000)}s.`);
+      await sleep(backoff + Math.random() * 1000);
+      backoff = Math.min(backoff * 2, 60_000);
+    }
+  }
+}
+
 async function run(initial: CompanionConfig): Promise<void> {
   let config = await requirePaired(initial);
   const server = new ServerClient(config.server.url, config.server.token);
-  const me = await server.me();
+  let me: Awaited<ReturnType<ServerClient["me"]>>;
+  try {
+    me = await retrying("the bot", () => server.me(), isPairingError);
+  } catch (err) {
+    if (isPairingError(err)) throw new Error(`${errorText(err)}. Pair again with a new link from /pair.`);
+    throw err;
+  }
   log(`Connected to the bot as ${me.userName} (${me.queued} upload${me.queued === 1 ? "" : "s"} waiting).`);
   let { config: loggedIn, vrchat } = await ensureLoggedIn(config);
   config = loggedIn;
@@ -149,8 +179,8 @@ async function run(initial: CompanionConfig): Promise<void> {
       job = await server.next(POLL_SECONDS, AbortSignal.timeout((POLL_SECONDS + 15) * 1000));
       backoff = 1000;
     } catch (err) {
-      if (err instanceof ServerError && (err.status === 401 || err.status === 403)) {
-        throw new Error(`${err.message}. Pair again with a new link from /pair.`);
+      if (isPairingError(err)) {
+        throw new Error(`${errorText(err)}. Pair again with a new link from /pair.`);
       }
       log(`Can't reach the bot (${errorText(err)}), retrying in ${Math.round(backoff / 1000)}s.`);
       await sleep(backoff + Math.random() * 1000);

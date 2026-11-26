@@ -17,10 +17,10 @@ export async function convertItem(
   switch (kind) {
     case "sticker":
     case "emoji":
-      await makeSquare(input, output);
+      params.transparent = (await makeSquare(input, output)).transparent;
       break;
     case "print":
-      await makePrint(input, output, printMode);
+      params.transparent = (await makePrint(input, output, printMode)).transparent;
       if (item.caption) params.note = item.caption;
       params.takenAt = new Date(item.taken_at).toISOString();
       break;
