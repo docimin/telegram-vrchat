@@ -54,9 +54,41 @@ async function errorMessage(res: Response): Promise<string> {
   return text.slice(0, 200) || `HTTP ${res.status}`;
 }
 
+export interface InventoryEntry {
+  id: string;
+  createdAt: string;
+  imageUrl: string | undefined;
+  mine: boolean;
+}
+
+const FileList = z.array(
+  z.object({
+    id: z.string(),
+    versions: z.array(
+      z.object({
+        created_at: z.string().optional(),
+        file: z.object({ url: z.string() }).optional(),
+      }),
+    ),
+  }),
+);
+
+const PrintList = z.array(
+  z.object({
+    id: z.string(),
+    authorId: z.string().optional(),
+    createdAt: z.string().optional(),
+    timestamp: z.string().optional(),
+    files: z.object({ image: z.string().optional() }).optional(),
+  }),
+);
+
+const MAX_PREVIEW_BYTES = 10 * 1024 * 1024;
+
 export class VRChatClient {
   readonly cookies: Map<string, string>;
   private readonly base: string;
+  private cachedUserId: string | undefined;
 
   constructor(
     private readonly userAgent: string,
@@ -144,7 +176,9 @@ export class VRChatClient {
     if (res.status === 401) return null;
     await this.expectOk(res);
     const parsed = CurrentUser.safeParse(await res.json());
-    return parsed.success ? parsed.data : null;
+    if (!parsed.success) return null;
+    this.cachedUserId = parsed.data.id;
+    return parsed.data;
   }
 
   async logout(): Promise<void> {
@@ -169,5 +203,80 @@ export class VRChatClient {
   // Prints (POST /prints).
   uploadPrint(file: Blob, fileName: string, fields: Record<string, string>): Promise<string> {
     return this.upload("/prints", "image", file, fileName, fields);
+  }
+
+  private async userId(): Promise<string> {
+    if (this.cachedUserId) return this.cachedUserId;
+    const user = await this.currentUser();
+    if (!user) throw new VRChatAuthError(401, "Not logged in");
+    return user.id;
+  }
+
+  // Own stickers ("sticker") or emoji ("emoji", which includes animated emoji).
+  async listFiles(tag: "sticker" | "emoji"): Promise<InventoryEntry[]> {
+    const res = await this.expectOk(await this.request("GET", `/files?tag=${tag}&n=100`));
+    return FileList.parse(await res.json()).map((file) => {
+      const latest = file.versions.filter((v) => v.file?.url).at(-1);
+      return {
+        id: file.id,
+        createdAt: file.versions[0]?.created_at ?? "",
+        imageUrl: latest?.file?.url,
+        mine: true,
+      };
+    });
+  }
+
+  // All prints in the user's inventory, including ones saved from other people.
+  async listPrints(): Promise<InventoryEntry[]> {
+    const userId = await this.userId();
+    const res = await this.expectOk(await this.request("GET", `/prints/user/${encodeURIComponent(userId)}`));
+    return PrintList.parse(await res.json()).map((print) => ({
+      id: print.id,
+      createdAt: print.createdAt ?? print.timestamp ?? "",
+      imageUrl: print.files?.image,
+      mine: print.authorId === undefined || print.authorId === userId,
+    }));
+  }
+
+  // Deleting something that is already gone counts as success.
+  async deleteFile(fileId: string): Promise<void> {
+    const res = await this.request("DELETE", `/file/${encodeURIComponent(fileId)}`);
+    if (res.status === 404) return void (await res.body?.cancel());
+    await this.expectOk(res);
+    await res.body?.cancel();
+  }
+
+  async deletePrint(printId: string): Promise<void> {
+    const res = await this.request("DELETE", `/prints/${encodeURIComponent(printId)}`);
+    if (res.status === 404) return void (await res.body?.cancel());
+    await this.expectOk(res);
+    await res.body?.cancel();
+  }
+
+  // Fetch an inventory image for a preview. The session cookie only goes to the API host;
+  // redirects (to VRChat's file storage) are followed without it. Returns null on any failure.
+  async downloadImage(url: string): Promise<Blob | null> {
+    try {
+      const target = new URL(url);
+      const headers: Record<string, string> = { "User-Agent": this.userAgent };
+      if (target.host === new URL(this.base).host && this.cookies.size) {
+        headers.Cookie = [...this.cookies].map(([k, v]) => `${k}=${v}`).join("; ");
+      }
+      let res = await fetch(target, { headers, redirect: "manual" });
+      if (res.status >= 300 && res.status < 400) {
+        const location = res.headers.get("location");
+        await res.body?.cancel();
+        if (!location) return null;
+        res = await fetch(new URL(location, target), { headers: { "User-Agent": this.userAgent } });
+      }
+      if (!res.ok) {
+        await res.body?.cancel();
+        return null;
+      }
+      const blob = await res.blob();
+      return blob.size > 0 && blob.size <= MAX_PREVIEW_BYTES ? blob : null;
+    } catch {
+      return null;
+    }
   }
 }

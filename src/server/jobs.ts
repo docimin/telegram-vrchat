@@ -1,12 +1,40 @@
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { animatedFileName } from "../shared/formats.ts";
-import { type Job, JobParams, type JobResult } from "../shared/protocol.ts";
+import { InventoryFull, type Job, JobParams, type JobResult } from "../shared/protocol.ts";
 import { logError } from "./log.ts";
 import type { ItemRow, Store } from "./store.ts";
 
 export type QueueEvent =
   | { type: "item"; item: ItemRow }
+  | { type: "full"; item: ItemRow; offer: InventoryFull }
   | { type: "session-expired"; userId: number };
+
+const PREVIEW_TYPES = [
+  { ext: "png", magic: [0x89, 0x50, 0x4e, 0x47] },
+  { ext: "jpg", magic: [0xff, 0xd8, 0xff] },
+  { ext: "webp", magic: [0x52, 0x49, 0x46, 0x46] },
+] as const;
+
+// Identify an uploaded preview image by its first bytes; anything else is rejected.
+export function previewExtension(bytes: Uint8Array): string | null {
+  const type = PREVIEW_TYPES.find((t) => t.magic.every((b, i) => bytes[i] === b));
+  return type?.ext ?? null;
+}
+
+export function previewPath(item: ItemRow): string | null {
+  for (const { ext } of PREVIEW_TYPES) {
+    const path = join(item.dir, `oldest-preview.${ext}`);
+    if (existsSync(path)) return path;
+  }
+  return null;
+}
+
+export function itemOffer(item: ItemRow): InventoryFull | null {
+  if (!item.offer) return null;
+  const parsed = InventoryFull.safeParse(JSON.parse(item.offer));
+  return parsed.success ? parsed.data : null;
+}
 
 const STALE_CLAIM_MS = 10 * 60 * 1000;
 
@@ -126,6 +154,17 @@ export class JobQueue {
         claimed_at: null,
       });
       this.emit({ type: "item", item: updated });
+      return updated;
+    }
+    if (result.reason === "full" && result.full) {
+      const updated = this.store.updateItem(item.id, {
+        status: "full",
+        offer: JSON.stringify(result.full),
+        error: result.error,
+        claimed_at: null,
+      });
+      this.emit({ type: "item", item: updated });
+      this.emit({ type: "full", item: updated, offer: result.full });
       return updated;
     }
     if (result.reason === "session") {

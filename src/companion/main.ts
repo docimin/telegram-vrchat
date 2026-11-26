@@ -24,7 +24,9 @@ Usage:
   vrc-companion status     show pairing and login state
   vrc-companion unpair     forget the bot pairing
 
-Config file: ${configPath()}`;
+Config file: ${configPath()}
+
+Made by Herr Coroni`;
 
 type Paired = CompanionConfig & { server: NonNullable<CompanionConfig["server"]> };
 
@@ -158,6 +160,7 @@ async function retrying<T>(what: string, fn: () => Promise<T>, fatal: (err: unkn
 }
 
 async function run(initial: CompanionConfig): Promise<void> {
+  console.log(`VRChat upload companion ${VERSION}, made by Herr Coroni\n`);
   let config = await requirePaired(initial);
   const server = new ServerClient(config.server.url, config.server.token);
   let me: Awaited<ReturnType<ServerClient["me"]>>;

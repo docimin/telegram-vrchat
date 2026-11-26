@@ -49,7 +49,10 @@ function startMockTelegram() {
           params[key] = typeof value === "string" ? value : `<file ${value.name}>`;
         }
       }
-      if (typeof params.reply_markup === "string") params.reply_markup = JSON.parse(params.reply_markup);
+      for (const key of ["reply_markup", "reply_parameters"]) {
+        const value = params[key];
+        if (typeof value === "string") params[key] = JSON.parse(value);
+      }
       for (const [key, value] of Object.entries(params)) {
         if (typeof value === "string" && value.startsWith("attach://")) params[key] = params[value.slice(9)];
       }
@@ -130,6 +133,11 @@ beforeAll(async () => {
   const clip = join(dir, "fixtures", "clip.mp4");
   await Bun.spawn(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=duration=1:size=160x120:rate=10", "-pix_fmt", "yuv420p", clip]).exited;
   fixtures.set("animations/clip.mp4", clip);
+  const whiteBg = join(dir, "fixtures", "whitebg.jpg");
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400"><rect width="400" height="400" fill="#fff"/>
+    <circle cx="200" cy="200" r="120" fill="#fff" stroke="#111" stroke-width="12"/><circle cx="200" cy="200" r="40" fill="#36c"/></svg>`;
+  await sharp(Buffer.from(svg)).jpeg({ quality: 85 }).toFile(whiteBg);
+  fixtures.set("photos/whitebg.jpg", whiteBg);
 
   telegram = startMockTelegram();
   store = new Store(join(dir, "bot.sqlite"));
@@ -182,6 +190,7 @@ describe("access", () => {
 
     await send(command(FRIEND, `/start ${code}`));
     expect(last("sendMessage").params.text).toContain("VRChat upload bot");
+    expect(last("sendMessage").params.text).toContain("<i>Made by Herr Coroni</i>");
     expect(store.userByTelegramId(FRIEND)?.allowed).toBe(1);
 
     await send(command(STRANGER, `/start ${code}`));
@@ -292,6 +301,78 @@ describe("conversion flow", () => {
     await send(press(FRIEND, `x:${id}`, 1));
     expect(store.item(id)?.status).toBe("cancelled");
     expect(last("editMessageText").params.text).toBe("Discarded.");
+  });
+
+  test("white-background photo offers removal, with undo, and the sticker keeps the cut-out", async () => {
+    await send(message(FRIEND, { photo: [{ file_id: "photos/whitebg.jpg", file_unique_id: "w", width: 400, height: 400 }] }));
+    const picker = last("sendMessage");
+    expect(String(picker.params.text)).toContain("Tap Remove white background");
+    const id = itemIdFrom(picker);
+    expect(buttons(picker)).toEqual([`k:${id}:sticker`, `k:${id}:emoji`, `k:${id}:print`, `w:${id}`, `x:${id}`]);
+
+    await send(press(FRIEND, `w:${id}`, 700));
+    let edited = last("editMessageText");
+    expect(String(edited.params.text)).toStartWith("White background removed.");
+    expect(buttons(edited)).toContain(`n:${id}`);
+
+    await send(press(FRIEND, `n:${id}`, 700));
+    edited = last("editMessageText");
+    expect(buttons(edited)).toContain(`w:${id}`);
+    expect(store.item(id)?.input_name).toBe("input.jpg");
+
+    await send(press(FRIEND, `w:${id}`, 700));
+    await send(press(FRIEND, `k:${id}:sticker`, 700));
+    const doc = last("sendDocument");
+    expect(String(doc.params.caption)).toContain("(white background removed)");
+    const item = store.item(id);
+    if (!item) throw new Error("missing");
+    const corner = await sharp(outputPath(item)).extract({ left: 0, top: 0, width: 1, height: 1 }).raw().toBuffer();
+    expect(corner[3]).toBe(0);
+  });
+
+  test("full inventory shows the oldest item and deletes it only after the user confirms", async () => {
+    const friend = store.userByTelegramId(FRIEND);
+    if (!friend) throw new Error("missing");
+    await send(message(FRIEND, { document: { file_id: "documents/logo.png", file_unique_id: "d", file_name: "logo.png", mime_type: "image/png" } }));
+    const id = itemIdFrom(last("sendMessage"));
+    await send(press(FRIEND, `k:${id}:sticker`, 800));
+    const item = store.item(id);
+    if (!item?.message_id) throw new Error("no result message");
+    await send(press(FRIEND, `u:${id}`, item.message_id));
+
+    const claimed = await queue.next(friend.id, 0);
+    if (!claimed) throw new Error("not claimed");
+    await sharp({ create: { width: 64, height: 64, channels: 4, background: "#0f0" } }).png().toFile(join(item.dir, "oldest-preview.png"));
+    calls.length = 0;
+    queue.finish(claimed, {
+      ok: false,
+      reason: "full",
+      error: "Your VRChat stickers are full (18/18)",
+      full: { pool: "sticker", count: 18, limit: 18, oldestId: "file_old", oldestCreatedAt: "2024-01-02T03:04:05.000Z", oldestMine: true },
+    });
+    await Bun.sleep(50);
+
+    const caption = last("editMessageCaption");
+    expect(String(caption.params.caption)).toContain("Your VRChat stickers are full (18/18)");
+    expect(String(caption.params.caption)).toContain("from 2 Jan 2024");
+    expect(buttons(caption)).toEqual([`d:${id}`, `u:${id}`, `x:${id}`]);
+    const preview = last("sendPhoto");
+    expect(preview.params.photo).toBe("<file oldest-preview.png>");
+    expect(String(preview.params.caption)).toContain("Your oldest sticker, from 2 Jan 2024");
+    expect((preview.params.reply_parameters as { message_id?: number }).message_id).toBe(item.message_id);
+    expect(store.item(id)?.status).toBe("full");
+
+    await send(press(FRIEND, `d:${id}`, item.message_id));
+    const queued = store.item(id);
+    expect(queued?.status).toBe("queued");
+    expect(JSON.parse(queued?.params ?? "{}").replaceId).toBe("file_old");
+    expect(String(last("editMessageCaption").params.caption)).toContain("deletes your oldest sticker");
+
+    const again = await queue.next(friend.id, 0);
+    if (!again) throw new Error("not requeued");
+    queue.finish(again, { ok: true, vrchatId: "file_new" });
+    await Bun.sleep(30);
+    expect(String(last("editMessageCaption").params.caption)).toContain("Your oldest sticker was deleted to make room.");
   });
 
   test("expired companion session sends a DM to the user", async () => {

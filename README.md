@@ -1,5 +1,7 @@
 # telegram-vrchat
 
+Made by **Herr Coroni**.
+
 A Telegram DM bot that turns images into VRChat **stickers**, **emoji**, **animated emoji** and **prints**, plus a small **companion app** that uploads them to each person's own VRChat account.
 
 Every conversation with the bot happens in a private chat. The bot is invite-only and meant for a group of friends.
@@ -34,9 +36,17 @@ So the server never sees a VRChat login. The companion runs on each person's PC,
 | Image | Print | 1920x1080 PNG. Non-16:9 photos: crop to fill, or fit on a blurred background. The caption becomes the print note |
 | GIF / video (up to 60 s) | Animated emoji | 1024x1024 spritesheet in VRChat's 2x2 / 4x4 / 8x8 grid, up to 64 frames, frame rate picked to fit the clip |
 
-Sticker, emoji and print uploads need VRC+. VRChat allows 18 custom stickers and 18 custom emoji per account.
+Sticker, emoji and print uploads need VRC+.
 
-Telegram compresses photos; send them as a *file* for full quality. Bots can download files up to 20 MB.
+### Transparency
+
+Transparent PNG, WebP, GIF and WebM files keep their transparency in every output, and the bot says when it found any. Telegram sends *photos* as JPEG, which turns a transparent background white, so send images as a *file* to keep it (and full quality). Bots can download files up to 20 MB.
+
+For images that arrive with a white background anyway, the bot offers **Remove white background**. It removes white connected to the image edges (white enclosed by an outline, like eyes or fur, stays) and softens the cut edge. **Undo background removal** brings the original back.
+
+### Full inventory
+
+VRChat allows 18 stickers, 18 emoji (animated ones included) and 64 prints. Before each upload the companion counts what is there. If there is no free slot, the bot says so, shows a preview and the date of your oldest item, and offers **Delete oldest and upload**. Nothing is deleted unless you tap that button, and only that exact item is deleted. **Retry** uploads again after you made room yourself.
 
 ## Running the bot
 
@@ -129,6 +139,11 @@ Conversion (`items.ts`, `media.ts`), the queue and the companion API know nothin
 
 ## Not verified yet
 
-- Nothing has been uploaded to the real VRChat API yet. Endpoints and field names follow the community docs at [vrchat.community](https://vrchat.community) and are tested against a mock.
+- Sticker, emoji and print uploads have worked against the real VRChat API. Animated emoji, deleting the oldest item, and VRChat's response to a full inventory have only been tested against a mock. Endpoints and field names follow the community docs at [vrchat.community](https://vrchat.community).
 - Prints are uploaded as a plain 1920x1080 photo. The wiki says prints are stored at 1080p but does not say whether VRChat adds the white frame itself; check the first real print.
+- The inventory limits (18 / 18 / 64) come from the VRChat Wiki. VRChat's error message for a full inventory is undocumented; the companion also treats upload errors mentioning a limit as "full".
 - The VRChat API is unofficial and can change without notice.
+
+## Credits
+
+Made by Herr Coroni.

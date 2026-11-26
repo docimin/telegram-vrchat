@@ -1,10 +1,12 @@
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { Bot, type Context, GrammyError, InlineKeyboard, InputFile } from "grammy";
-import { ANIMATION_STYLES, type UploadKind } from "../shared/protocol.ts";
+import { POOL_NAMES, poolFor } from "../shared/formats.ts";
+import { ANIMATION_STYLES, type InventoryFull, type UploadKind } from "../shared/protocol.ts";
 import type { Config } from "./config.ts";
-import { convertItem, needsAnimationStyle } from "./items.ts";
-import { type JobQueue, itemParams, outputPath, uploadFileName } from "./jobs.ts";
+import { whiteBorderRatio } from "./background.ts";
+import { backgroundRemoved, convertItem, needsAnimationStyle, removeBackground, restoreBackground } from "./items.ts";
+import { type JobQueue, inputPath, itemOffer, itemParams, outputPath, previewPath, uploadFileName } from "./jobs.ts";
 import { MediaError, aspectRatio, hasTransparency, inspect, isPrintShaped } from "./media.ts";
 import { type ItemRow, type Store, type UserRow, randomId } from "./store.ts";
 import { COMPANION_BUILDS } from "./api.ts";
@@ -40,6 +42,16 @@ const KIND_LABELS: Record<UploadKind, string> = {
 
 const INVENTORY_URL = "https://vrchat.com/home/inventory";
 
+// Share of near-white border pixels from which the bot offers to remove a white background.
+const WHITE_BORDER_MIN = 0.6;
+
+interface PickerState {
+  compressed: boolean;
+  transparent: boolean;
+  whiteBackground: boolean;
+  removed: boolean;
+}
+
 function esc(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
@@ -63,6 +75,12 @@ function ago(timestamp: number | null): string {
   const hours = Math.round(minutes / 60);
   if (hours < 48) return `${hours} h ago`;
   return `${Math.round(hours / 24)} days ago`;
+}
+
+function formatDate(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "an unknown date";
+  return date.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
 }
 
 function isNotModified(err: unknown): boolean {
@@ -100,6 +118,14 @@ const ADMIN_HELP = `
 /users - list users
 /revoke &lt;telegram id&gt; - remove someone's access`;
 
+export const CREDIT = "Made by Herr Coroni";
+
+// Shown in the empty chat before someone presses Start, and on the bot's profile.
+const BOT_DESCRIPTION = `Turn images, GIFs and short videos into VRChat stickers, emoji and prints, and upload them to your own VRChat account with the companion app. Invite only.
+
+${CREDIT}.`;
+const BOT_SHORT_DESCRIPTION = `VRChat stickers, emoji and prints from your images. ${CREDIT}.`;
+
 const NOT_INVITED = "This bot is invite-only. Ask the owner for an invite link.";
 
 export function createBot(deps: BotDeps): Bot<BotContext> {
@@ -120,7 +146,7 @@ export function createBot(deps: BotDeps): Bot<BotContext> {
     return user;
   };
 
-  const helpFor = (user: UserRow) => (isAdmin(user) ? HELP + ADMIN_HELP : HELP);
+  const helpFor = (user: UserRow) => `${isAdmin(user) ? HELP + ADMIN_HELP : HELP}\n\n<i>${CREDIT}</i>`;
 
   // Rendering of an item's result message.
 
@@ -131,10 +157,12 @@ export function createBot(deps: BotDeps): Bot<BotContext> {
     if (item.kind === "emojianimated" && params.frames && params.fps) {
       details.push(`${params.frames} frames at ${params.fps} fps`);
     }
-    if (params.transparent) details.push("transparent background kept");
+    if (backgroundRemoved(item)) details.push("white background removed");
+    else if (params.transparent) details.push("transparent background kept");
     if (params.animationStyle) details.push(`effect: ${params.animationStyle}`);
     if (item.kind === "print" && params.note) details.push(`note: "${esc(params.note.slice(0, 200))}"`);
     const head = `<b>${label}</b>${details.length ? ` (${details.join(", ")})` : ""}`;
+    const replacing = params.replaceId && item.kind ? POOL_NAMES[poolFor(item.kind)].one : null;
 
     if (item.status === "ready" && needsAnimationStyle(item)) {
       const kb = new InlineKeyboard();
@@ -155,13 +183,40 @@ export function createBot(deps: BotDeps): Bot<BotContext> {
         };
       case "queued":
         return {
-          caption: `${head}\nQueued. Your companion uploads it as soon as it's running and logged in.`,
+          caption: replacing
+            ? `${head}\nQueued. Your companion deletes your oldest ${replacing} and uploads this as soon as it's running and logged in.`
+            : `${head}\nQueued. Your companion uploads it as soon as it's running and logged in.`,
           keyboard: new InlineKeyboard().text("Cancel", `x:${item.id}`),
         };
       case "uploading":
         return { caption: `${head}\nUploading to VRChat...`, keyboard: undefined };
       case "done":
-        return { caption: `${head}\nUploaded to your VRChat account.`, keyboard: undefined };
+        return {
+          caption: replacing
+            ? `${head}\nUploaded to your VRChat account. Your oldest ${replacing} was deleted to make room.`
+            : `${head}\nUploaded to your VRChat account.`,
+          keyboard: undefined,
+        };
+      case "full": {
+        const offer = itemOffer(item);
+        if (!offer) {
+          return {
+            caption: `${head}\n${esc(item.error ?? "Your VRChat inventory is full.")}`,
+            keyboard: new InlineKeyboard().text("Retry", `u:${item.id}`).text("Discard", `x:${item.id}`),
+          };
+        }
+        const names = POOL_NAMES[offer.pool];
+        const whose = offer.oldestMine ? "" : ", saved from someone else";
+        return {
+          caption: `${head}\nYour VRChat ${names.many} are full (${offer.count}/${offer.limit}). Delete your oldest ${names.one} (from ${formatDate(offer.oldestCreatedAt)}${whose}) to make room? Nothing is deleted unless you tap the button.`,
+          keyboard: new InlineKeyboard()
+            .text(`Delete oldest ${names.one} and upload`, `d:${item.id}`)
+            .row()
+            .text("Retry (I made room myself)", `u:${item.id}`)
+            .row()
+            .text("Discard", `x:${item.id}`),
+        };
+      }
       case "failed":
         return {
           caption: `${head}\nUpload failed: ${esc((item.error ?? "unknown error").slice(0, 300))}`,
@@ -186,9 +241,26 @@ export function createBot(deps: BotDeps): Bot<BotContext> {
     }
   };
 
+  // Show the user which item would be deleted, as a reply to the upload message.
+  const sendOldestPreview = async (item: ItemRow, offer: InventoryFull): Promise<void> => {
+    const path = previewPath(item);
+    const names = POOL_NAMES[offer.pool];
+    const caption = `Your oldest ${names.one}, from ${formatDate(offer.oldestCreatedAt)}. This is the one that gets deleted if you tap "Delete oldest ${names.one} and upload".`;
+    const reply = item.message_id ? { reply_parameters: { message_id: item.message_id, allow_sending_without_reply: true } } : {};
+    if (path) {
+      await bot.api.sendPhoto(item.chat_id, new InputFile(path), { caption, ...reply });
+    } else {
+      await bot.api.sendMessage(item.chat_id, `${caption} (I couldn't load a preview of it.)`, reply);
+    }
+  };
+
   queue.onEvent((event) => {
     if (event.type === "item") {
       void refresh(event.item);
+      return;
+    }
+    if (event.type === "full") {
+      void sendOldestPreview(event.item, event.offer).catch((err) => logError("Failed to send oldest preview:", err));
       return;
     }
     const user = store.userById(event.userId);
@@ -229,6 +301,40 @@ export function createBot(deps: BotDeps): Bot<BotContext> {
     await ctx.reply("Something went wrong converting that. Try another file, or send it in a different format.");
   };
 
+  // The "What should this become?" message for still images.
+
+  const pickerState = async (item: ItemRow, compressed: boolean): Promise<PickerState> => {
+    const path = inputPath(item);
+    const removed = backgroundRemoved(item);
+    const transparent = !removed && !compressed && (await hasTransparency(path));
+    const whiteBackground = !removed && !transparent && (await whiteBorderRatio(path)) >= WHITE_BORDER_MIN;
+    return { compressed, transparent, whiteBackground, removed };
+  };
+
+  const pickerView = (id: string, state: PickerState, note?: string): { text: string; keyboard: InlineKeyboard } => {
+    let text = "What should this become?";
+    if (note) text = `${note}\n\n${text}`;
+    else if (state.removed) text = `White background removed.\n\n${text}`;
+    else if (state.transparent) text += "\n\nTransparent background detected, it will be kept.";
+    else if (state.whiteBackground) {
+      text += state.compressed
+        ? "\n\nTelegram sends photos without transparency, so a transparent background arrives as white. Tap Remove white background to cut it out, or send the image as a file next time."
+        : "\n\nThis has a white background. Tap Remove white background to make it transparent.";
+    } else if (state.compressed) {
+      text +=
+        "\n\nThis came in as a photo, so Telegram compressed it and removed any transparency. To keep a transparent background and full quality, send the image as a file instead.";
+    }
+    const keyboard = new InlineKeyboard()
+      .text("Sticker", `k:${id}:sticker`)
+      .text("Emoji", `k:${id}:emoji`)
+      .text("Print", `k:${id}:print`)
+      .row();
+    if (state.removed) keyboard.text("Undo background removal", `n:${id}`).row();
+    else if (state.whiteBackground && !note) keyboard.text("Remove white background", `w:${id}`).row();
+    keyboard.text("Discard", `x:${id}`);
+    return { text, keyboard };
+  };
+
   const intake = async (
     ctx: BotContext,
     file: { fileId: string; size: number | undefined; ext: string; animated: boolean; compressed?: boolean },
@@ -263,21 +369,8 @@ export function createBot(deps: BotDeps): Bot<BotContext> {
         await sendResult(ctx, item);
         return;
       }
-      let prompt = "What should this become?";
-      if (file.compressed) {
-        prompt +=
-          "\n\nThis came in as a photo, so Telegram compressed it and removed any transparency. To keep a transparent background and full quality, send the image as a file instead.";
-      } else if (await hasTransparency(join(dir, inputName))) {
-        prompt += "\n\nTransparent background detected, it will be kept.";
-      }
-      await ctx.reply(prompt, {
-        reply_markup: new InlineKeyboard()
-          .text("Sticker", `k:${id}:sticker`)
-          .text("Emoji", `k:${id}:emoji`)
-          .text("Print", `k:${id}:print`)
-          .row()
-          .text("Discard", `x:${id}`),
-      });
+      const picker = pickerView(id, await pickerState(item, file.compressed ?? false));
+      await ctx.reply(picker.text, { reply_markup: picker.keyboard });
     } catch (err) {
       if (!store.item(id)) await rm(dir, { recursive: true, force: true });
       await reportFailure(ctx, err);
@@ -508,6 +601,50 @@ Keep the companion running whenever you want uploads to go through.`,
     await convertAndSend(ctx, item, "print", mode === "fit" ? "fit" : "fill");
   });
 
+  bot.callbackQuery(/^w:(\w+)$/, async (ctx) => {
+    const [, id = ""] = ctx.match;
+    const item = await ownItem(ctx, id);
+    if (!item) return;
+    if (item.status !== "new" || busy.has(id)) {
+      await ctx.answerCallbackQuery();
+      return;
+    }
+    busy.add(id);
+    try {
+      await ctx.answerCallbackQuery();
+      await ctx.editMessageText("Removing the white background...");
+      const { item: updated, outcome } = await removeBackground(store, item);
+      const state = await pickerState(updated, false);
+      const note =
+        outcome === "nothing"
+          ? "I couldn't find a white background touching the edges, so nothing was removed."
+          : outcome === "everything"
+            ? "That would have removed almost the whole image, so I kept it as it was."
+            : undefined;
+      const picker = pickerView(id, state, note);
+      await ctx.editMessageText(picker.text, { reply_markup: picker.keyboard });
+    } catch (err) {
+      await ctx.editMessageText("Removing the background failed.").catch(() => undefined);
+      await reportFailure(ctx, err);
+    } finally {
+      busy.delete(id);
+    }
+  });
+
+  bot.callbackQuery(/^n:(\w+)$/, async (ctx) => {
+    const [, id = ""] = ctx.match;
+    const item = await ownItem(ctx, id);
+    if (!item) return;
+    if (item.status !== "new" || busy.has(id)) {
+      await ctx.answerCallbackQuery();
+      return;
+    }
+    const restored = await restoreBackground(store, item);
+    await ctx.answerCallbackQuery({ text: "Original image restored." });
+    const picker = pickerView(id, await pickerState(restored, false));
+    await ctx.editMessageText(picker.text, { reply_markup: picker.keyboard });
+  });
+
   bot.callbackQuery(/^a:(\w+):(\d+)$/, async (ctx) => {
     const [, id = "", index = ""] = ctx.match;
     const item = await ownItem(ctx, id);
@@ -527,7 +664,7 @@ Keep the companion running whenever you want uploads to go through.`,
     const [, id = ""] = ctx.match;
     const item = await ownItem(ctx, id);
     if (!item || !ctx.appUser) return;
-    if (item.status !== "ready" && item.status !== "failed") {
+    if (item.status !== "ready" && item.status !== "failed" && item.status !== "full") {
       await ctx.answerCallbackQuery();
       return;
     }
@@ -542,15 +679,32 @@ Keep the companion running whenever you want uploads to go through.`,
       });
       return;
     }
+    if (item.status === "full") store.updateItem(item.id, { offer: null });
     queue.enqueue(item.id);
     await ctx.answerCallbackQuery({ text: "Queued for upload." });
+  });
+
+  // The user confirmed deleting the oldest item shown to them; only that exact item is deleted.
+  bot.callbackQuery(/^d:(\w+)$/, async (ctx) => {
+    const [, id = ""] = ctx.match;
+    const item = await ownItem(ctx, id);
+    if (!item) return;
+    const offer = itemOffer(item);
+    if (item.status !== "full" || !offer) {
+      await ctx.answerCallbackQuery();
+      return;
+    }
+    const params = { ...itemParams(item), replaceId: offer.oldestId };
+    store.updateItem(item.id, { params: JSON.stringify(params) });
+    queue.enqueue(item.id);
+    await ctx.answerCallbackQuery({ text: `Queued: delete oldest ${POOL_NAMES[offer.pool].one}, then upload.` });
   });
 
   bot.callbackQuery(/^x:(\w+)$/, async (ctx) => {
     const [, id = ""] = ctx.match;
     const item = await ownItem(ctx, id);
     if (!item) return;
-    if (!["new", "ready", "queued", "failed"].includes(item.status)) {
+    if (!["new", "ready", "queued", "failed", "full"].includes(item.status)) {
       await ctx.answerCallbackQuery({ text: "Too late to cancel." });
       return;
     }
@@ -577,4 +731,6 @@ export async function registerCommands(bot: Bot<BotContext>): Promise<void> {
     { command: "devices", description: "List connected companions" },
     { command: "unpair", description: "Disconnect all companions" },
   ]);
+  await bot.api.setMyDescription(BOT_DESCRIPTION);
+  await bot.api.setMyShortDescription(BOT_SHORT_DESCRIPTION);
 }

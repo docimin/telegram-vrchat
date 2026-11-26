@@ -1,5 +1,21 @@
 // VRChat image requirements (VRChat Wiki: Inventory, Emojis, Prints pages).
 
+import type { InventoryPool, UploadKind } from "./protocol.ts";
+
+// Slots per inventory for VRC+ accounts. Animated emoji count toward the emoji slots.
+export const INVENTORY_LIMITS: Record<InventoryPool, number> = { sticker: 18, emoji: 18, print: 64 };
+
+export function poolFor(kind: UploadKind): InventoryPool {
+  if (kind === "print") return "print";
+  return kind === "sticker" ? "sticker" : "emoji";
+}
+
+export const POOL_NAMES: Record<InventoryPool, { one: string; many: string }> = {
+  sticker: { one: "sticker", many: "stickers" },
+  emoji: { one: "emoji", many: "emoji" },
+  print: { one: "print", many: "prints" },
+};
+
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 export const MIN_SIDE = 64;
 

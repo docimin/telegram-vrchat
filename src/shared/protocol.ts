@@ -45,6 +45,8 @@ export const JobParams = z.object({
   takenAt: z.string().optional(),
   // The source image had a transparent background that was kept.
   transparent: z.boolean().optional(),
+  // The user confirmed deleting this VRChat file or print to make room before uploading.
+  replaceId: z.string().max(200).optional(),
 });
 export type JobParams = z.infer<typeof JobParams>;
 
@@ -78,13 +80,30 @@ export const MeResponse = z.object({
   queued: z.number().int(),
 });
 
+// VRChat inventories that have a slot limit. Emoji and animated emoji share one.
+export const INVENTORY_POOLS = ["sticker", "emoji", "print"] as const;
+export type InventoryPool = (typeof INVENTORY_POOLS)[number];
+
+export const InventoryFull = z.object({
+  pool: z.enum(INVENTORY_POOLS),
+  count: z.number().int().min(0),
+  limit: z.number().int().min(1),
+  oldestId: z.string().min(1).max(200),
+  oldestCreatedAt: z.string().max(100),
+  // Prints can be saved from other people; false means the oldest one isn't the user's own.
+  oldestMine: z.boolean(),
+});
+export type InventoryFull = z.infer<typeof InventoryFull>;
+
 export const JobResult = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), vrchatId: z.string().max(200) }),
   z.object({
     ok: z.literal(false),
     error: z.string().max(500),
-    // "session" means the companion's VRChat login expired; the job goes back in the queue.
-    reason: z.enum(["session", "other"]),
+    // "session": the companion's VRChat login expired; the job goes back in the queue.
+    // "full": no free slot; the user is asked whether to delete the oldest item.
+    reason: z.enum(["session", "other", "full"]),
+    full: InventoryFull.optional(),
   }),
 ]);
 export type JobResult = z.infer<typeof JobResult>;

@@ -27,7 +27,25 @@ let vrc: ReturnType<typeof Bun.serve>;
 let user: UserRow;
 const events: QueueEvent[] = [];
 const uploads: Recorded[] = [];
-const mock = { throttleNext: false, expireSession: false };
+const mock = { throttleNext: false, expireSession: false, limitError: false };
+
+interface MockEntry {
+  id: string;
+  createdAt: string;
+  authorId?: string;
+}
+// What the mock VRChat account currently holds, per inventory.
+const inventory: Record<"sticker" | "emoji" | "print", MockEntry[]> = { sticker: [], emoji: [], print: [] };
+const deleted: string[] = [];
+// Cookie header seen by the storage host when a preview is downloaded (must stay empty).
+const storageCookies: string[] = [];
+
+function entries(count: number, prefix: string, oldestIndex: number): MockEntry[] {
+  return Array.from({ length: count }, (_, i) => ({
+    id: `${prefix}_${i}`,
+    createdAt: i === oldestIndex ? "2024-01-02T03:04:05.000Z" : `2026-0${1 + (i % 9)}-1${i % 10}T00:00:00.000Z`,
+  }));
+}
 
 const CONTACT = "owner@example.invalid";
 const UA = `VRCUploadCompanion/0.1.0 ${CONTACT}`;
@@ -100,6 +118,9 @@ function startMockVRChat() {
             return new Response("slow down", { status: 429, headers: { "retry-after": "0" } });
           }
           if (mock.expireSession) return Response.json({ error: { message: "Missing Credentials" } }, { status: 401 });
+          if (mock.limitError) {
+            return Response.json({ error: { message: "You have reached the maximum number of emoji", status_code: 400 } }, { status: 400 });
+          }
           await record(req, "/file/image", "file");
           return Response.json({ id: "file_abc" });
         },
@@ -108,6 +129,57 @@ function startMockVRChat() {
         POST: async (req) => {
           await record(req, "/prints", "image");
           return Response.json({ id: "prnt_1" });
+        },
+      },
+      "/api/1/files": (req) => {
+        const tag = new URL(req.url).searchParams.get("tag");
+        const list = tag === "sticker" || tag === "emoji" ? inventory[tag] : [];
+        const base = new URL(req.url).origin;
+        return Response.json(
+          list.map((e) => ({
+            id: e.id,
+            tags: [tag],
+            versions: [
+              { version: 0, status: "complete", created_at: e.createdAt },
+              { version: 1, status: "complete", created_at: e.createdAt, file: { url: `${base}/api/1/file/${e.id}/1/file` } },
+            ],
+          })),
+        );
+      },
+      "/api/1/file/:id": {
+        DELETE: (req) => {
+          const pool = inventory.sticker.some((e) => e.id === req.params.id) ? inventory.sticker : inventory.emoji;
+          const index = pool.findIndex((e) => e.id === req.params.id);
+          if (index < 0) return Response.json({ error: { message: "File not found" } }, { status: 404 });
+          pool.splice(index, 1);
+          deleted.push(req.params.id);
+          return Response.json({ id: req.params.id });
+        },
+      },
+      // Real VRChat redirects file downloads to its storage host; "localhost" stands in for that host here.
+      "/api/1/file/:id/1/file": (req) =>
+        new Response(null, { status: 302, headers: { location: `http://localhost:${new URL(req.url).port}/storage/${req.params.id}.png` } }),
+      "/storage/:name": async (req) => {
+        storageCookies.push(req.headers.get("cookie") ?? "");
+        const png = await sharp({ create: { width: 64, height: 64, channels: 4, background: "#0f0" } }).png().toBuffer();
+        return new Response(png, { headers: { "content-type": "image/png" } });
+      },
+      "/api/1/prints/user/:userId": (req) =>
+        Response.json(
+          inventory.print.map((e) => ({
+            id: e.id,
+            authorId: e.authorId ?? req.params.userId,
+            createdAt: e.createdAt,
+            files: { image: `${new URL(req.url).origin}/api/1/file/${e.id}/1/file` },
+          })),
+        ),
+      "/api/1/prints/:id": {
+        DELETE: (req) => {
+          const index = inventory.print.findIndex((e) => e.id === req.params.id);
+          if (index < 0) return Response.json({ error: { message: "Print not found" } }, { status: 404 });
+          inventory.print.splice(index, 1);
+          deleted.push(req.params.id);
+          return new Response(null, { status: 200 });
         },
       },
     },
@@ -305,5 +377,113 @@ describe("upload flow", () => {
     await expect(strangerServer.report(job.id, { ok: true, vrchatId: "x" })).rejects.toThrow(/No such job/);
     await server.report(job.id, { ok: false, reason: "other", error: "test" });
     expect(store.item(item.id)?.status).toBe("failed");
+  });
+});
+
+describe("full inventory", () => {
+  let server: ServerClient;
+  let vrchat: VRChatClient;
+
+  beforeAll(async () => {
+    const code = store.createPairCode(user.id);
+    const paired = await pairDevice(`${api.url.origin}/pair/${code}`, "full-pc");
+    server = new ServerClient(paired.serverUrl, paired.token);
+    vrchat = new VRChatClient(UA, { auth: "authcookie_1", twoFactorAuth: "tfa_1" }, `${vrc.url.origin}/api/1`);
+  });
+
+  async function claim(item: ItemRow) {
+    queue.enqueue(item.id);
+    const job = await server.next(1);
+    if (!job || job.id !== item.id) throw new Error("job not claimed");
+    return job;
+  }
+
+  test("18 stickers: offers the oldest with a preview, deletes exactly that one after confirmation", async () => {
+    inventory.sticker = entries(18, "file_s", 7);
+    const uploadsBefore = uploads.length;
+    const item = await readyItem("sticker", {});
+    const job = await claim(item);
+
+    const result = await processJob(job, server, vrchat);
+    expect(result).toEqual({
+      ok: false,
+      reason: "full",
+      error: "Your VRChat stickers are full (18/18)",
+      full: { pool: "sticker", count: 18, limit: 18, oldestId: "file_s_7", oldestCreatedAt: "2024-01-02T03:04:05.000Z", oldestMine: true },
+    });
+    expect(uploads.length).toBe(uploadsBefore);
+    expect(deleted).toEqual([]);
+    expect(storageCookies.at(-1)).toBe("");
+    expect(await Bun.file(join(item.dir, "oldest-preview.png")).exists()).toBe(true);
+
+    await server.report(job.id, result);
+    const full = store.item(item.id);
+    expect(full?.status).toBe("full");
+    expect(events.some((e) => e.type === "full" && e.item.id === item.id && e.offer.oldestId === "file_s_7")).toBe(true);
+
+    // The user taps "Delete oldest sticker and upload": the bot sets replaceId to the offered item.
+    store.updateItem(item.id, { params: JSON.stringify({ replaceId: "file_s_7" }) });
+    const confirmed = await claim(item);
+    const done = await processJob(confirmed, server, vrchat);
+    expect(done).toEqual({ ok: true, vrchatId: "file_abc" });
+    expect(deleted).toEqual(["file_s_7"]);
+    expect(inventory.sticker).toHaveLength(17);
+    expect(uploads.at(-1)?.fields.tag).toBe("sticker");
+    await server.report(confirmed.id, done);
+    expect(store.item(item.id)?.status).toBe("done");
+  });
+
+  test("animated emoji count toward the emoji slots; a limit error from VRChat also counts as full", async () => {
+    inventory.emoji = entries(18, "file_e", 0);
+    const item = await readyItem("emojianimated", { frames: 4, fps: 8, animationStyle: "spin" });
+    const job = await claim(item);
+    const result = await processJob(job, server, vrchat);
+    expect(result.ok === false && result.full?.pool).toBe("emoji");
+    await server.report(job.id, result);
+
+    inventory.emoji = entries(5, "file_f", 2);
+    mock.limitError = true;
+    const item2 = await readyItem("emoji", { animationStyle: "spin" });
+    const job2 = await claim(item2);
+    const result2 = await processJob(job2, server, vrchat);
+    mock.limitError = false;
+    expect(result2.ok === false && result2.reason).toBe("full");
+    expect(result2.ok === false && result2.full?.oldestId).toBe("file_f_2");
+    expect(result2.ok === false && result2.full?.limit).toBe(18);
+    await server.report(job2.id, result2);
+  });
+
+  test("prints: the oldest can be a print saved from someone else", async () => {
+    inventory.print = entries(64, "prnt_p", 3);
+    const oldest = inventory.print[3];
+    if (oldest) oldest.authorId = "usr_someone_else";
+    const item = await readyItem("print", { takenAt: "2026-11-20T18:30:00.000Z" });
+    const job = await claim(item);
+    const result = await processJob(job, server, vrchat);
+    expect(result.ok === false && result.full).toEqual({
+      pool: "print",
+      count: 64,
+      limit: 64,
+      oldestId: "prnt_p_3",
+      oldestCreatedAt: "2024-01-02T03:04:05.000Z",
+      oldestMine: false,
+    });
+    await server.report(job.id, result);
+
+    store.updateItem(item.id, { params: JSON.stringify({ takenAt: "2026-11-20T18:30:00.000Z", replaceId: "prnt_p_3" }) });
+    const confirmed = await claim(item);
+    expect(await processJob(confirmed, server, vrchat)).toEqual({ ok: true, vrchatId: "prnt_1" });
+    expect(deleted.at(-1)).toBe("prnt_p_3");
+    await server.report(confirmed.id, { ok: true, vrchatId: "prnt_1" });
+  });
+
+  test("the preview endpoint only accepts images for the device's own claimed job", async () => {
+    const item = await readyItem("sticker", {});
+    const res = await fetch(`${api.url.origin}/api/jobs/${item.id}/preview`, { method: "POST", body: "x" });
+    expect(res.status).toBe(401);
+    inventory.sticker = [];
+    const job = await claim(item);
+    await expect(server.uploadPreview(job.id, new Blob(["not an image"]))).rejects.toThrow(/PNG, JPEG or WebP/);
+    await server.report(job.id, await processJob(job, server, vrchat));
   });
 });

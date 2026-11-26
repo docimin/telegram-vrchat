@@ -2,7 +2,8 @@ import { Database, type SQLQueryBindings } from "bun:sqlite";
 import type { UploadKind } from "../shared/protocol.ts";
 import type { SourceType } from "./media.ts";
 
-export type ItemStatus = "new" | "ready" | "queued" | "uploading" | "done" | "failed" | "cancelled";
+// "full": the VRChat inventory for this kind had no free slot; the user is asked to replace the oldest item.
+export type ItemStatus = "new" | "ready" | "queued" | "uploading" | "done" | "failed" | "full" | "cancelled";
 
 export interface UserRow {
   id: number;
@@ -35,13 +36,18 @@ export interface ItemRow {
   message_id: number | null;
   error: string | null;
   vrchat_id: string | null;
+  // JSON of InventoryFull when status is "full".
+  offer: string | null;
   claimed_at: number | null;
   created_at: number;
   updated_at: number;
 }
 
 export type ItemPatch = Partial<
-  Pick<ItemRow, "kind" | "params" | "status" | "message_id" | "error" | "vrchat_id" | "claimed_at">
+  Pick<
+    ItemRow,
+    "kind" | "params" | "status" | "message_id" | "error" | "vrchat_id" | "claimed_at" | "input_name" | "offer"
+  >
 >;
 
 const SCHEMA = `
@@ -87,6 +93,7 @@ CREATE TABLE IF NOT EXISTS items (
   message_id INTEGER,
   error TEXT,
   vrchat_id TEXT,
+  offer TEXT,
   claimed_at INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
@@ -125,6 +132,15 @@ export class Store {
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA foreign_keys = ON;");
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+
+  // Columns added after the first release, for databases created before them.
+  private migrate(): void {
+    const columns = new Set(
+      this.db.query<{ name: string }, []>("SELECT name FROM pragma_table_info('items')").all().map((c) => c.name),
+    );
+    if (!columns.has("offer")) this.db.exec("ALTER TABLE items ADD COLUMN offer TEXT");
   }
 
   close(): void {

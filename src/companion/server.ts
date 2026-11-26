@@ -88,6 +88,15 @@ export class ServerClient {
     return new Blob([await res.arrayBuffer()], { type: "image/png" });
   }
 
+  // Picture of the item VRChat would delete, shown to the user when their inventory is full.
+  async uploadPreview(jobId: string, image: Blob): Promise<void> {
+    await this.call(`/api/jobs/${encodeURIComponent(jobId)}/preview`, {
+      method: "POST",
+      headers: { "Content-Type": image.type || "application/octet-stream" },
+      body: image,
+    });
+  }
+
   async report(jobId: string, result: JobResult): Promise<void> {
     await this.call(`/api/jobs/${encodeURIComponent(jobId)}/result`, {
       method: "POST",

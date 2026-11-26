@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { JobResult, PairRequest } from "../shared/protocol.ts";
 import type { Config } from "./config.ts";
-import { type JobQueue, outputPath, toJob } from "./jobs.ts";
+import { type JobQueue, outputPath, previewExtension, toJob } from "./jobs.ts";
 import { logError } from "./log.ts";
 import type { DeviceRow, Store } from "./store.ts";
 
@@ -12,6 +12,7 @@ export interface ApiDeps {
 }
 
 const MAX_WAIT_SECONDS = 30;
+const MAX_PREVIEW_BYTES = 10 * 1024 * 1024;
 
 export const COMPANION_BUILDS = {
   windows: "vrc-companion-windows.exe",
@@ -129,6 +130,23 @@ export function startApi(deps: ApiDeps) {
           const item = ownedItem(device, req.params.id);
           if (!item || item.status !== "uploading") return error(404, "No such job");
           return new Response(Bun.file(outputPath(item)), { headers: { "content-type": "image/png" } });
+        },
+      },
+
+      "/api/jobs/:id/preview": {
+        POST: async (req) => {
+          const device = authenticate(req);
+          if (!device) return error(401, "Unknown device, pair again");
+          const item = ownedItem(device, req.params.id);
+          if (!item || item.status !== "uploading") return error(404, "No such job");
+          const declared = Number(req.headers.get("content-length") ?? "0");
+          if (declared > MAX_PREVIEW_BYTES) return error(413, "Preview too large");
+          const bytes = new Uint8Array(await req.arrayBuffer());
+          if (bytes.length === 0 || bytes.length > MAX_PREVIEW_BYTES) return error(413, "Preview too large");
+          const ext = previewExtension(bytes);
+          if (!ext) return error(415, "Preview must be PNG, JPEG or WebP");
+          await Bun.write(join(item.dir, `oldest-preview.${ext}`), bytes);
+          return json({ ok: true });
         },
       },
 
