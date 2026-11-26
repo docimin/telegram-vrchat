@@ -1,0 +1,52 @@
+name: Build companion
+
+# Run by hand from the Actions tab (or `gh workflow run build-companion.yml`).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.5
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      # Bun cross-compiles all three targets from this one runner.
+      - name: Build companion
+        run: bun run build:companion
+
+      # Artifact zips drop the executable bit, so the Linux and macOS binaries go in tarballs.
+      - name: Package
+        run: |
+          tar -czf dist/vrc-companion-linux.tar.gz -C dist vrc-companion-linux
+          tar -czf dist/vrc-companion-macos.tar.gz -C dist vrc-companion-macos
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vrc-companion-windows
+          path: dist/vrc-companion-windows.exe
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vrc-companion-linux
+          path: dist/vrc-companion-linux.tar.gz
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vrc-companion-macos
+          path: dist/vrc-companion-macos.tar.gz
+          if-no-files-found: error
