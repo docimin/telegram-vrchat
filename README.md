@@ -115,6 +115,7 @@ vrc-companion pair LINK  pair using the link from /pair
 vrc-companion login      log in to VRChat (supports authenticator, email and recovery codes)
 vrc-companion logout     end the VRChat session on this PC
 vrc-companion status     show pairing and login state
+vrc-companion update     check for a newer version and install it
 vrc-companion unpair     forget the pairing
 ```
 
@@ -125,6 +126,12 @@ It stores its config (bot URL, device token, VRChat session cookies) at:
 - macOS: `~/Library/Application Support/vrc-companion/config.json`
 
 It identifies itself to VRChat as `VRCUploadCompanion/<version> <VRCHAT_CONTACT>`, backs off on HTTP 429 and 5xx, and makes no VRChat calls while idle (it waits on the bot, not on VRChat).
+
+### Updates
+
+On every start the companion asks GitHub for the latest release. If it is newer, it asks `Install it now? [Y/n]`. On yes it downloads the file for your system, checks it against the release's `SHA256SUMS`, replaces itself and restarts into the new version. On no it carries on and asks again next start. Without a terminal (for example as a background service) it only logs that an update exists, and when run from source with `bun run` it never replaces anything. On Windows the old `.exe` is moved aside to `.exe.old` and deleted on the next start.
+
+Companions from before v0.2.0 have no updater, so friends on v0.1.0 need to download the new version once by hand.
 
 ## Development
 

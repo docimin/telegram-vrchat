@@ -4,6 +4,7 @@ import type { Job, JobResult } from "../shared/protocol.ts";
 import { type CompanionConfig, configPath, loadConfig, saveConfig } from "./config.ts";
 import { PromptCancelled, ask, askHidden } from "./prompt.ts";
 import { ServerClient, ServerError, pairDevice } from "./server.ts";
+import { type UpdateInfo, checkForUpdate, cleanupAfterUpdate, installUpdate, isStandalone, restart } from "./updater.ts";
 import { processJob } from "./uploader.ts";
 import { type CurrentUser, type LoginResult, VRChatApiError, VRChatClient } from "./vrchat.ts";
 
@@ -24,7 +25,10 @@ Usage:
   vrc-companion login      log in to VRChat
   vrc-companion logout     log out of VRChat on this computer
   vrc-companion status     show pairing and login state
+  vrc-companion update     check for a newer version and install it
   vrc-companion unpair     forget the bot pairing
+
+On every start it checks GitHub for a newer version and asks before installing it.
 
 Config file: ${configPath()}
 
@@ -161,8 +165,55 @@ async function retrying<T>(what: string, fn: () => Promise<T>, fatal: (err: unkn
   }
 }
 
+// Look for a newer release and ask before installing it. At startup a successful update restarts
+// into the new version; the explicit `update` command just installs it.
+async function offerUpdate(explicit: boolean): Promise<void> {
+  if (!isStandalone()) {
+    if (explicit) console.log("Updates only work for the downloaded companion, not when running from source.");
+    return;
+  }
+  await cleanupAfterUpdate();
+  // The process that just installed an update started this one; don't ask again right away.
+  if (!explicit && process.env.VRC_COMPANION_UPDATED === "1") return;
+  const userAgent = `${APP_NAME}/${VERSION}`;
+  let update: UpdateInfo | null;
+  try {
+    update = await checkForUpdate(VERSION, { userAgent });
+  } catch (err) {
+    log(`Couldn't check for updates (${errorText(err)}).`);
+    return;
+  }
+  if (!update) {
+    if (explicit) console.log(`You have the latest version (${VERSION}).`);
+    return;
+  }
+  if (!process.stdin.isTTY) {
+    log(`Version ${update.version} is available: ${update.pageUrl}`);
+    return;
+  }
+  const answer = (await ask(`Version ${update.version} is available (you have ${VERSION}). Install it now? [Y/n] `)).toLowerCase();
+  if (answer !== "" && !["y", "yes", "j", "ja"].includes(answer)) {
+    log(`Staying on ${VERSION}. You'll be asked again next time.`);
+    return;
+  }
+  log(`Downloading ${update.version}...`);
+  try {
+    await installUpdate(update, process.execPath, userAgent);
+  } catch (err) {
+    log(`Update failed (${errorText(err)}). Staying on ${VERSION}; you can download it from ${update.pageUrl}`);
+    return;
+  }
+  if (explicit) {
+    log(`Updated to ${update.version}.`);
+    return;
+  }
+  log(`Updated to ${update.version}. Restarting...\n`);
+  await restart();
+}
+
 async function run(initial: CompanionConfig): Promise<void> {
   console.log(`VRChat upload companion ${VERSION}, made by Herr Coroni\n`);
+  await offerUpdate(false);
   let config = await requirePaired(initial);
   const server = new ServerClient(config.server.url, config.server.token);
   let me: Awaited<ReturnType<ServerClient["me"]>>;
@@ -248,6 +299,9 @@ async function main(argv: string[]): Promise<void> {
     }
     case "status":
       await status(config);
+      return;
+    case "update":
+      await offerUpdate(true);
       return;
     case "unpair":
       await saveConfig({ ...config, server: undefined });
