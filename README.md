@@ -92,6 +92,8 @@ bun install
 bun run start
 ```
 
+Run exactly one copy per bot token: Telegram delivers messages to only one poller and answers `409 Conflict` to the others. Don't scale the bot to more than one replica, and stop any copy on your PC once the server runs it. During a redeploy the old and new copy may overlap for a moment; the new one keeps retrying for up to 3 minutes until the old one is gone.
+
 The companion API listens on `PORT` (default 8080). Data (SQLite database and converted files) goes to `DATA_DIR`; files are deleted after 7 days.
 
 ## Using it

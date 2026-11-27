@@ -6,6 +6,7 @@ import { createBot, registerCommands } from "./bot.ts";
 import { type Config, loadConfig } from "./config.ts";
 import { JobQueue } from "./jobs.ts";
 import { addSecret, logError } from "./log.ts";
+import { isConflict, pollWithConflictGrace } from "./polling.ts";
 import { Store } from "./store.ts";
 
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -89,9 +90,18 @@ try {
 
 console.log(`Companion API listening on ${server.url} (public URL ${config.publicUrl})`);
 console.log(`Telegram bot @${bot.botInfo.username} is running`);
+const CONFLICT_GRACE_MS = 3 * 60_000;
 try {
-  await bot.start({ allowed_updates: ["message", "callback_query"] });
+  await pollWithConflictGrace(() => bot.start({ allowed_updates: ["message", "callback_query"] }), {
+    graceMs: CONFLICT_GRACE_MS,
+    retryMs: () => 5_000 + Math.random() * 2_000,
+    isStopping: () => stopping,
+    onConflict: () =>
+      console.log(
+        "Another copy of this bot is polling Telegram right now. That is normal for a moment during a redeploy; retrying for up to 3 minutes.",
+      ),
+  });
 } catch (err) {
-  reportTelegramFailure("Telegram polling stopped", err);
+  reportTelegramFailure(isConflict(err) ? "Telegram polling stopped after 3 minutes of retrying" : "Telegram polling stopped", err);
   await shutdown("Polling failed", 1);
 }
