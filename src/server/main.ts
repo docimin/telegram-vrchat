@@ -1,4 +1,5 @@
 import { mkdir, rm } from "node:fs/promises";
+import { GrammyError, HttpError } from "grammy";
 import { join } from "node:path";
 import { startApi } from "./api.ts";
 import { createBot, registerCommands } from "./bot.ts";
@@ -58,11 +59,31 @@ async function shutdown(reason: string, code = 0): Promise<void> {
 process.on("SIGINT", () => void shutdown("SIGINT received"));
 process.on("SIGTERM", () => void shutdown("SIGTERM received"));
 
+// One sentence for the Telegram failures people actually run into; null means "show the details".
+function telegramProblem(err: unknown): string | null {
+  if (err instanceof GrammyError) {
+    if (err.error_code === 409) {
+      return "Another copy of this bot is already running with the same TELEGRAM_BOT_TOKEN, and Telegram only lets one copy receive messages. Stop the other copy (for example the one on your PC or your server), then start this one again.";
+    }
+    if (err.error_code === 401 || err.error_code === 404) {
+      return "Telegram rejected TELEGRAM_BOT_TOKEN. Copy the token again from @BotFather.";
+    }
+  }
+  if (err instanceof HttpError) return "Can't reach Telegram. Check this machine's internet connection.";
+  return null;
+}
+
+function reportTelegramFailure(context: string, err: unknown): void {
+  const problem = telegramProblem(err);
+  if (problem) logError(`${context}: ${problem}`);
+  else logError(`${context}:`, err);
+}
+
 try {
   await bot.init();
   await registerCommands(bot);
 } catch (err) {
-  logError("Could not connect to Telegram. Check TELEGRAM_BOT_TOKEN.", err);
+  reportTelegramFailure("Could not start the Telegram bot", err);
   await shutdown("Startup failed", 1);
 }
 
@@ -71,6 +92,6 @@ console.log(`Telegram bot @${bot.botInfo.username} is running`);
 try {
   await bot.start({ allowed_updates: ["message", "callback_query"] });
 } catch (err) {
-  logError("Telegram polling stopped:", err);
+  reportTelegramFailure("Telegram polling stopped", err);
   await shutdown("Polling failed", 1);
 }

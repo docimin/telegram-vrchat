@@ -1,9 +1,10 @@
 import { hostname } from "node:os";
+import { basename } from "node:path";
 import pkg from "../../package.json" with { type: "json" };
 import type { Job, JobResult } from "../shared/protocol.ts";
 import { type CompanionConfig, configPath, loadConfig, saveConfig } from "./config.ts";
 import { PromptCancelled, ask, askHidden } from "./prompt.ts";
-import { ServerClient, ServerError, pairDevice } from "./server.ts";
+import { ServerClient, ServerError, pairDevice, parsePairLink } from "./server.ts";
 import { type UpdateInfo, checkForUpdate, cleanupAfterUpdate, installUpdate, isStandalone, restart } from "./updater.ts";
 import { processJob } from "./uploader.ts";
 import { type CurrentUser, type LoginResult, VRChatApiError, VRChatClient } from "./vrchat.ts";
@@ -49,6 +50,32 @@ function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+// Plain-language reason a request to the bot or VRChat failed.
+function connectionProblem(err: unknown): string {
+  if (err instanceof ServerError) return `it answered HTTP ${err.status}: ${err.message}`;
+  if (err instanceof Error) {
+    const code = "code" in err ? String(err.code) : "";
+    if (code === "ECONNREFUSED") return "nothing is answering at that address";
+    if (code === "ENOTFOUND") return "that address doesn't exist";
+    if (err.name === "TimeoutError") return "no answer in time";
+    if (/CERT|SSL|TLS/i.test(code)) return `its HTTPS certificate isn't valid (${code})`;
+    return err.message;
+  }
+  return String(err);
+}
+
+// The name to put in command hints: the downloaded file's own name, or "vrc-companion" from source.
+function commandName(): string {
+  return isStandalone() ? `./${basename(process.execPath)}` : "vrc-companion";
+}
+
+function repairHint(): string {
+  return `If the bot moved to a new address, pair again: send /pair to the bot in Telegram, then run ${commandName()} pair <link>`;
+}
+
+// Consecutive failures before the companion explains how to pair again.
+const HINT_AFTER_FAILURES = 3;
+
 function userAgent(config: Paired): string {
   return `${APP_NAME}/${VERSION} ${config.server.contact}`;
 }
@@ -59,7 +86,14 @@ function vrchatFor(config: Paired): VRChatClient {
 
 async function pair(config: CompanionConfig, link?: string): Promise<Paired> {
   const pairLink = link ?? (await ask("Paste the pairing link from the bot's /pair message: "));
-  const result = await pairDevice(pairLink, hostname().slice(0, 100) || "companion");
+  const { serverUrl } = parsePairLink(pairLink);
+  let result: Awaited<ReturnType<typeof pairDevice>>;
+  try {
+    result = await pairDevice(pairLink, hostname().slice(0, 100) || "companion");
+  } catch (err) {
+    if (err instanceof ServerError) throw err;
+    throw new Error(`Couldn't reach the bot at ${serverUrl} (${connectionProblem(err)}). Check that the link is complete.`);
+  }
   const next: Paired = {
     ...config,
     server: { url: result.serverUrl, token: result.token, contact: result.contact, userName: result.userName },
@@ -71,7 +105,7 @@ async function pair(config: CompanionConfig, link?: string): Promise<Paired> {
 
 async function requirePaired(config: CompanionConfig): Promise<Paired> {
   if (config.server) return config as Paired;
-  if (!process.stdin.isTTY) throw new Error("Not paired yet. Run: vrc-companion pair <link from /pair>");
+  if (!process.stdin.isTTY) throw new Error(`Not paired yet. Send /pair to the bot, then run ${commandName()} pair <link>`);
   return pair(config);
 }
 
@@ -151,14 +185,20 @@ function isPairingError(err: unknown): boolean {
 }
 
 // Keep trying while the other side is down or unreachable; give up only on errors retrying can't fix.
-async function retrying<T>(what: string, fn: () => Promise<T>, fatal: (err: unknown) => boolean): Promise<T> {
+async function retrying<T>(
+  what: string,
+  fn: () => Promise<T>,
+  fatal: (err: unknown) => boolean,
+  hint?: string,
+): Promise<T> {
   let backoff = 1000;
-  for (;;) {
+  for (let failures = 1; ; failures++) {
     try {
       return await fn();
     } catch (err) {
       if (fatal(err)) throw err;
-      log(`Can't reach ${what} (${errorText(err)}), retrying in ${Math.round(backoff / 1000)}s.`);
+      log(`Can't reach ${what} (${connectionProblem(err)}), retrying in ${Math.round(backoff / 1000)}s.`);
+      if (hint && failures === HINT_AFTER_FAILURES) log(hint);
       await sleep(backoff + Math.random() * 1000);
       backoff = Math.min(backoff * 2, 60_000);
     }
@@ -218,7 +258,7 @@ async function run(initial: CompanionConfig): Promise<void> {
   const server = new ServerClient(config.server.url, config.server.token);
   let me: Awaited<ReturnType<ServerClient["me"]>>;
   try {
-    me = await retrying("the bot", () => server.me(), isPairingError);
+    me = await retrying(`the bot at ${config.server.url}`, () => server.me(), isPairingError, repairHint());
   } catch (err) {
     if (isPairingError(err)) throw new Error(`${errorText(err)}. Pair again with a new link from /pair.`);
     throw err;
@@ -229,16 +269,21 @@ async function run(initial: CompanionConfig): Promise<void> {
   log("Waiting for uploads. Leave this window open; press Ctrl+C to stop.");
 
   let backoff = 1000;
+  let failures = 0;
   for (;;) {
     let job: Job | null;
     try {
       job = await server.next(POLL_SECONDS, AbortSignal.timeout((POLL_SECONDS + 15) * 1000));
+      if (failures > 0) log("Connected to the bot again.");
       backoff = 1000;
+      failures = 0;
     } catch (err) {
       if (isPairingError(err)) {
         throw new Error(`${errorText(err)}. Pair again with a new link from /pair.`);
       }
-      log(`Can't reach the bot (${errorText(err)}), retrying in ${Math.round(backoff / 1000)}s.`);
+      failures++;
+      log(`Can't reach the bot at ${config.server.url} (${connectionProblem(err)}), retrying in ${Math.round(backoff / 1000)}s.`);
+      if (failures === HINT_AFTER_FAILURES) log(repairHint());
       await sleep(backoff + Math.random() * 1000);
       backoff = Math.min(backoff * 2, 60_000);
       continue;
