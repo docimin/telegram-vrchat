@@ -1,4 +1,5 @@
 import { hostname } from "node:os";
+import pkg from "../../package.json" with { type: "json" };
 import type { Job, JobResult } from "../shared/protocol.ts";
 import { type CompanionConfig, configPath, loadConfig, saveConfig } from "./config.ts";
 import { PromptCancelled, ask, askHidden } from "./prompt.ts";
@@ -7,7 +8,8 @@ import { processJob } from "./uploader.ts";
 import { type CurrentUser, type LoginResult, VRChatApiError, VRChatClient } from "./vrchat.ts";
 
 const APP_NAME = "VRCUploadCompanion";
-const VERSION = "0.1.0";
+// package.json is the single source of the version; releases are tagged v<version>.
+const VERSION = pkg.version;
 const POLL_SECONDS = 25;
 
 const USAGE = `VRChat upload companion ${VERSION}

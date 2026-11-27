@@ -101,6 +101,14 @@ Other commands: `/devices` lists paired companions, `/unpair` disconnects them, 
 
 Standalone executables for Windows, Linux and macOS (Apple Silicon) are built into `dist/` by `bun run build:companion` and served by the bot at `/download/windows`, `/download/linux` and `/download/macos`. Double-clicking it on Windows pairs, logs in and starts uploading. The binaries are unsigned, so Windows SmartScreen and macOS Gatekeeper will warn the first time.
 
+They are also attached to every [GitHub release](https://github.com/docimin/telegram-vrchat/releases). To publish one, bump `version` in `package.json` (the companion reports that version), push, and run the **Build companion** workflow from the Actions tab:
+
+```bash
+gh workflow run build-companion.yml
+```
+
+It typechecks, runs the tests, builds all three platforms and creates release `v<version>` with the binaries and a `SHA256SUMS` file. It stops if that release already exists. `-f release=false` builds without releasing and keeps the files as a workflow artifact instead.
+
 ```
 vrc-companion            pair, log in and start uploading
 vrc-companion pair LINK  pair using the link from /pair

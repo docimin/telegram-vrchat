@@ -1,17 +1,29 @@
 name: Build companion
 
-# Run by hand from the Actions tab (or `gh workflow run build-companion.yml`).
+# Run by hand from the Actions tab, or:
+#   gh workflow run build-companion.yml                   build and publish release v<version>
+#   gh workflow run build-companion.yml -f release=false  build only, as a workflow artifact
+# The version comes from package.json; bump it before publishing a new release.
 on:
   workflow_dispatch:
+    inputs:
+      release:
+        description: Publish a GitHub release tagged v<version from package.json>
+        type: boolean
+        default: true
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: build-companion
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -20,33 +32,72 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Install ffmpeg for the tests
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
       - name: Typecheck
         run: bun run typecheck
+
+      - name: Test
+        run: bun test
+
+      - name: Read version
+        id: version
+        run: echo "version=$(jq -r .version package.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Stop if this version is already released
+        if: inputs.release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ steps.version.outputs.version }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "::error::Release $TAG already exists. Bump \"version\" in package.json, push, and run again."
+            exit 1
+          fi
 
       # Bun cross-compiles all three targets from this one runner.
       - name: Build companion
         run: bun run build:companion
 
-      # Artifact zips drop the executable bit, so the Linux and macOS binaries go in tarballs.
+      # Tarballs keep the executable bit on Linux and macOS.
       - name: Package
         run: |
-          tar -czf dist/vrc-companion-linux.tar.gz -C dist vrc-companion-linux
-          tar -czf dist/vrc-companion-macos.tar.gz -C dist vrc-companion-macos
+          mkdir -p dist/release
+          cp dist/vrc-companion-windows.exe dist/release/
+          tar -czf dist/release/vrc-companion-linux.tar.gz -C dist vrc-companion-linux
+          tar -czf dist/release/vrc-companion-macos.tar.gz -C dist vrc-companion-macos
+          (cd dist/release && sha256sum -- * > SHA256SUMS)
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: vrc-companion-windows
-          path: dist/vrc-companion-windows.exe
-          if-no-files-found: error
+      - name: Publish release
+        if: inputs.release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ steps.version.outputs.version }}
+        run: |
+          cat > "$RUNNER_TEMP/notes.md" <<'EOF'
+          Download the file for your computer, run it, and paste the pairing link from the bot's `/pair` message.
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: vrc-companion-linux
-          path: dist/vrc-companion-linux.tar.gz
-          if-no-files-found: error
+          | System | File |
+          | --- | --- |
+          | Windows | `vrc-companion-windows.exe` |
+          | Linux | `vrc-companion-linux.tar.gz` |
+          | macOS (Apple Silicon) | `vrc-companion-macos.tar.gz` |
 
-      - uses: actions/upload-artifact@v4
+          The files are unsigned, so Windows SmartScreen and macOS Gatekeeper warn the first time you open them. `SHA256SUMS` lists the checksums.
+
+          Made by Herr Coroni.
+          EOF
+          gh release create "$TAG" dist/release/* \
+            --target "$GITHUB_SHA" \
+            --title "Companion $TAG" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --generate-notes
+
+      - name: Upload build
+        if: ${{ !inputs.release }}
+        uses: actions/upload-artifact@v7
         with:
-          name: vrc-companion-macos
-          path: dist/vrc-companion-macos.tar.gz
+          name: vrc-companion-${{ steps.version.outputs.version }}
+          path: dist/release/
           if-no-files-found: error
