@@ -1,11 +1,11 @@
 import { chmod, rename, rm, writeFile } from "node:fs/promises";
 import { basename } from "node:path";
 import { z } from "zod";
+import { RELEASE_ASSETS, RELEASE_REPO, platformOf } from "../shared/release.ts";
 
 // Self-update from GitHub releases. Only the standalone executable updates itself; running from
 // source with `bun run` never replaces anything.
 
-export const UPDATE_REPO = "docimin/telegram-vrchat";
 const GITHUB_API = "https://api.github.com";
 const SUMS_NAME = "SHA256SUMS";
 const MAX_DOWNLOAD_BYTES = 300 * 1024 * 1024;
@@ -43,11 +43,9 @@ export function compareVersions(a: string, b: string): number {
 }
 
 // Release file for this computer, as published by the build workflow.
-export function assetNameFor(platform: NodeJS.Platform = process.platform): string | null {
-  if (platform === "win32") return "vrc-companion-windows.exe";
-  if (platform === "linux") return "vrc-companion-linux.tar.gz";
-  if (platform === "darwin") return "vrc-companion-macos.tar.gz";
-  return null;
+export function assetNameFor(nodePlatform: NodeJS.Platform = process.platform): string | null {
+  const platform = platformOf(nodePlatform);
+  return platform ? RELEASE_ASSETS[platform] : null;
 }
 
 // True for the compiled companion; false when running under the bun binary from source.
@@ -61,7 +59,7 @@ export async function checkForUpdate(
   options: { userAgent: string; api?: string; repo?: string },
 ): Promise<UpdateInfo | null> {
   const api = (options.api ?? process.env.VRC_COMPANION_UPDATE_API ?? GITHUB_API).replace(/\/+$/, "");
-  const repo = options.repo ?? UPDATE_REPO;
+  const repo = options.repo ?? RELEASE_REPO;
   const res = await fetch(`${api}/repos/${repo}/releases/latest`, {
     headers: { "User-Agent": options.userAgent, Accept: "application/vnd.github+json" },
     signal: AbortSignal.timeout(10_000),

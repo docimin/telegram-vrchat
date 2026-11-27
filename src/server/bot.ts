@@ -9,7 +9,7 @@ import { backgroundRemoved, convertItem, needsAnimationStyle, removeBackground, 
 import { type JobQueue, inputPath, itemOffer, itemParams, outputPath, previewPath, uploadFileName } from "./jobs.ts";
 import { MediaError, aspectRatio, hasTransparency, inspect, isPrintShaped } from "./media.ts";
 import { type ItemRow, type Store, type UserRow, randomId } from "./store.ts";
-import { COMPANION_BUILDS } from "./api.ts";
+import { PLATFORMS } from "../shared/release.ts";
 import { addSecret, logError } from "./log.ts";
 
 export interface BotDeps {
@@ -420,8 +420,7 @@ export function createBot(deps: BotDeps): Bot<BotContext> {
     if (!ctx.appUser) return;
     const code = store.createPairCode(ctx.appUser.id);
     const link = `${config.publicUrl}/pair/${code}`;
-    const downloads = (Object.keys(COMPANION_BUILDS) as Array<keyof typeof COMPANION_BUILDS>)
-      .map((p) => `<a href="${config.publicUrl}/download/${p}">${titleCase(p)}</a>`)
+    const downloads = PLATFORMS.map((p) => `<a href="${config.publicUrl}/download/${p}">${titleCase(p)}</a>`)
       .join(" | ");
     await ctx.reply(
       `<b>Pair the companion</b>

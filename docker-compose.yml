@@ -1,26 +1,32 @@
+# Bot plus Caddy for HTTPS. Set DOMAIN in .env (and PUBLIC_URL=https://<DOMAIN>), point the domain
+# at this server, then: docker compose up -d --build
 services:
   bot:
     build: .
     env_file: .env
     environment:
       DATA_DIR: /data
-      DIST_DIR: /app/dist
     volumes:
       - bot-data:/data
     restart: unless-stopped
 
   caddy:
     image: caddy:2
+    depends_on:
+      - bot
     ports:
       - "80:80"
       - "443:443"
+      - "443:443/udp"
     environment:
       DOMAIN: ${DOMAIN:?set DOMAIN in .env}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
+      - caddy-config:/config
     restart: unless-stopped
 
 volumes:
   bot-data:
   caddy-data:
+  caddy-config:

@@ -60,10 +60,24 @@ Fill in `.env`, then pick one of the options below.
 
 ### Docker compose (VPS)
 
-Builds the bot, the companion downloads and an HTTPS reverse proxy (Caddy). Set `DOMAIN` in `.env` and point that domain at the server.
+Runs the bot plus Caddy, which gets an HTTPS certificate automatically. Point your domain at the server, then in `.env` set `DOMAIN` to it and `PUBLIC_URL` to `https://<that domain>`.
 
 ```bash
 docker compose up -d --build
+```
+
+The bot's data (database and converted files) lives in the `bot-data` volume, so rebuilding or updating keeps it. Logs: `docker compose logs -f bot`.
+
+### Docker only
+
+The [Dockerfile](Dockerfile) builds a slim image (Bun, sharp, ffmpeg) that runs as a non-root user and has a health check. Put your own HTTPS reverse proxy in front of port 8080.
+
+```bash
+docker build -t telegram-vrchat .
+```
+
+```bash
+docker run -d --name telegram-vrchat --restart unless-stopped --env-file .env -p 8080:8080 -v telegram-vrchat-data:/data telegram-vrchat
 ```
 
 ### Directly with Bun
@@ -72,10 +86,6 @@ Needs Bun and `ffmpeg`/`ffprobe` on the PATH. Put it behind any HTTPS reverse pr
 
 ```bash
 bun install
-```
-
-```bash
-bun run build:companion
 ```
 
 ```bash
@@ -99,7 +109,7 @@ Other commands: `/devices` lists paired companions, `/unpair` disconnects them, 
 
 ## The companion
 
-Standalone executables for Windows, Linux and macOS (Apple Silicon) are built into `dist/` by `bun run build:companion` and served by the bot at `/download/windows`, `/download/linux` and `/download/macos`. Double-clicking it on Windows pairs, logs in and starts uploading. The binaries are unsigned, so Windows SmartScreen and macOS Gatekeeper will warn the first time.
+Standalone executables for Windows, Linux and macOS (Apple Silicon). The bot's `/download/windows`, `/download/linux` and `/download/macos` links (used in `/pair`) point to the latest GitHub release, or serve local builds from `DIST_DIR` if you made some with `bun run build:companion`. Double-clicking it on Windows pairs, logs in and starts uploading. The binaries are unsigned, so Windows SmartScreen and macOS Gatekeeper will warn the first time.
 
 They are also attached to every [GitHub release](https://github.com/docimin/telegram-vrchat/releases). To publish one, bump `version` in `package.json` (the companion reports that version), push, and run the **Build companion** workflow from the Actions tab:
 

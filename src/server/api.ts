@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { JobResult, PairRequest } from "../shared/protocol.ts";
+import { LOCAL_BUILDS, PLATFORMS, latestReleaseDownload } from "../shared/release.ts";
 import type { Config } from "./config.ts";
 import { type JobQueue, outputPath, previewExtension, toJob } from "./jobs.ts";
 import { logError } from "./log.ts";
@@ -13,12 +14,6 @@ export interface ApiDeps {
 
 const MAX_WAIT_SECONDS = 30;
 const MAX_PREVIEW_BYTES = 10 * 1024 * 1024;
-
-export const COMPANION_BUILDS = {
-  windows: "vrc-companion-windows.exe",
-  linux: "vrc-companion-linux",
-  macos: "vrc-companion-macos",
-} as const;
 
 function json(data: unknown, status = 200): Response {
   return Response.json(data, { status });
@@ -164,11 +159,12 @@ export function startApi(deps: ApiDeps) {
       },
 
       "/download/:platform": async (req) => {
-        const platform = req.params.platform;
-        if (!(platform in COMPANION_BUILDS)) return error(404, "Unknown platform");
-        const name = COMPANION_BUILDS[platform as keyof typeof COMPANION_BUILDS];
+        const platform = PLATFORMS.find((p) => p === req.params.platform);
+        if (!platform) return error(404, "Unknown platform");
+        const name = LOCAL_BUILDS[platform];
         const file = Bun.file(join(config.distDir, name));
-        if (!(await file.exists())) return error(404, "Companion build not found on this server");
+        // Without a local build, send people to the latest GitHub release: the same files the updater installs.
+        if (!(await file.exists())) return Response.redirect(latestReleaseDownload(platform), 302);
         return new Response(file, {
           headers: {
             "content-type": "application/octet-stream",

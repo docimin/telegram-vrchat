@@ -487,3 +487,23 @@ describe("full inventory", () => {
     await server.report(job.id, await processJob(job, server, vrchat));
   });
 });
+
+describe("companion downloads", () => {
+  test("serve a local build when present, otherwise redirect to the latest GitHub release", async () => {
+    const windows = await fetch(`${api.url.origin}/download/windows`, { redirect: "manual" });
+    expect(windows.status).toBe(302);
+    expect(windows.headers.get("location")).toBe(
+      "https://github.com/docimin/telegram-vrchat/releases/latest/download/vrc-companion-windows.exe",
+    );
+    const linux = await fetch(`${api.url.origin}/download/linux`, { redirect: "manual" });
+    expect(linux.headers.get("location")).toEndWith("/releases/latest/download/vrc-companion-linux.tar.gz");
+
+    await Bun.write(join(dir, "vrc-companion-macos"), "local build");
+    const mac = await fetch(`${api.url.origin}/download/macos`, { redirect: "manual" });
+    expect(mac.status).toBe(200);
+    expect(mac.headers.get("content-disposition")).toContain("vrc-companion-macos");
+    expect(await mac.text()).toBe("local build");
+
+    expect((await fetch(`${api.url.origin}/download/amiga`, { redirect: "manual" })).status).toBe(404);
+  });
+});
